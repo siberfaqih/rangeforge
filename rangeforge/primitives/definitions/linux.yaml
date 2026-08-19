@@ -1,0 +1,180 @@
+- id: service_enumeration
+  name: Service Enumeration
+  categories: [enumeration]
+  platforms: [linux]
+  requires:
+    states: [no_access]
+  provides:
+    state: service_discovered
+  profiles: [oscp]
+  difficulty: {enumeration: 1, exploitation: 1, dependency: 1}
+  description: Identifies an externally reachable service in the isolated lab scenario.
+
+- id: service_enumeration_deep
+  name: Deep Service Enumeration
+  categories: [enumeration]
+  platforms: [linux]
+  requires:
+    states: [no_access]
+  provides:
+    state: service_discovered
+  profiles: [oscp]
+  difficulty: {enumeration: 3, exploitation: 2, dependency: 2}
+  description: Requires more detailed service analysis in the isolated lab scenario.
+
+- id: public_exploit_rce
+  name: Abstract Public Exploit RCE
+  categories: [initial_access]
+  platforms: [linux]
+  requires:
+    states: [service_discovered]
+  provides:
+    state: low_priv_shell
+  profiles: [oscp]
+  difficulty: {enumeration: 1, exploitation: 1, dependency: 1}
+  description: Models initial shell access through an abstract public exploit; no CVE is installed.
+
+- id: web_command_injection
+  name: Abstract Web Command Injection
+  categories: [initial_access]
+  platforms: [linux]
+  requires:
+    states: [service_discovered]
+  provides:
+    state: low_priv_shell
+  profiles: [oscp]
+  difficulty: {enumeration: 2, exploitation: 2, dependency: 2}
+  description: Models command injection in a fictional local training application.
+
+- id: insecure_file_upload
+  name: Abstract Insecure File Upload
+  categories: [initial_access]
+  platforms: [linux]
+  requires:
+    states: [service_discovered]
+  provides:
+    state: low_priv_shell
+  profiles: [oscp]
+  difficulty: {enumeration: 2, exploitation: 2, dependency: 1}
+  description: Models an unsafe upload workflow without provisioning an application or payload.
+
+- id: credential_leak_initial_access
+  name: Credential Leak Initial Access
+  categories: [initial_access]
+  platforms: [linux]
+  requires:
+    states: [service_discovered]
+  provides:
+    state: low_priv_shell
+  profiles: [oscp]
+  difficulty: {enumeration: 1, exploitation: 1, dependency: 1}
+  description: Models credentials exposed by a fictional service in an isolated lab.
+
+- id: multi_step_web_rce
+  name: Multi-step Abstract Web RCE
+  categories: [initial_access]
+  platforms: [linux]
+  requires:
+    states: [service_discovered]
+  provides:
+    state: low_priv_shell
+  profiles: [oscp]
+  difficulty: {enumeration: 3, exploitation: 3, dependency: 3}
+  description: Models a reasoning-intensive, fictional multi-step web compromise.
+
+- id: credential_discovery_config
+  name: Configuration Credential Discovery
+  categories: [credential_discovery]
+  platforms: [linux]
+  requires:
+    states: [low_priv_shell]
+  provides:
+    state: user_shell
+  profiles: [oscp]
+  difficulty: {enumeration: 1, exploitation: 1, dependency: 1}
+  description: Models finding credentials in a fictional local configuration file.
+
+- id: credential_reuse
+  name: Local Credential Reuse
+  categories: [credential_discovery]
+  platforms: [linux]
+  requires:
+    states: [low_priv_shell]
+  provides:
+    state: user_shell
+  profiles: [oscp]
+  difficulty: {enumeration: 2, exploitation: 1, dependency: 1}
+  description: Models reuse of fictional credentials within the generated lab machine.
+
+- id: ssh_credential_access
+  name: SSH Credential Access
+  categories: [credential_discovery]
+  platforms: [linux]
+  requires:
+    states: [low_priv_shell]
+  provides:
+    state: user_shell
+  profiles: [oscp]
+  difficulty: {enumeration: 2, exploitation: 2, dependency: 2}
+  description: Models discovering local SSH credentials for a fictional lab account.
+
+- id: nested_secret_discovery
+  name: Nested Secret Discovery
+  categories: [credential_discovery]
+  platforms: [linux]
+  requires:
+    states: [low_priv_shell]
+  provides:
+    state: user_shell
+  profiles: [oscp]
+  difficulty: {enumeration: 3, exploitation: 3, dependency: 3}
+  description: Models a multi-stage hunt for fictional secrets on an isolated machine.
+
+- id: linux_sudo_misconfiguration
+  name: Sudo Misconfiguration
+  categories: [privilege_escalation]
+  platforms: [linux]
+  requires:
+    states: [user_shell]
+  provides:
+    state: root
+  profiles: [oscp]
+  difficulty: {enumeration: 1, exploitation: 1, dependency: 1}
+  description: Models a Linux privilege escalation path caused by unsafe sudo configuration.
+
+- id: linux_suid_misconfiguration
+  name: SUID Misconfiguration
+  categories: [privilege_escalation]
+  platforms: [linux]
+  requires:
+    states: [user_shell]
+  provides:
+    state: root
+  profiles: [oscp]
+  difficulty: {enumeration: 2, exploitation: 2, dependency: 1}
+  description: Models a fictional unsafe SUID configuration in an isolated lab.
+
+- id: linux_cron_misconfiguration
+  name: Cron Misconfiguration
+  categories: [privilege_escalation]
+  platforms: [linux]
+  requires:
+    states: [user_shell]
+  provides:
+    state: root
+  profiles: [oscp]
+  difficulty: {enumeration: 2, exploitation: 2, dependency: 2}
+  description: Models an unsafe scheduled-task configuration in an isolated lab.
+
+- id: linux_capabilities_misconfiguration
+  name: Linux Capabilities Misconfiguration
+  categories: [privilege_escalation]
+  platforms: [linux]
+  requires:
+    states: [user_shell, low_priv_shell]
+  provides:
+    state: root
+  profiles: [oscp]
+  difficulty: {enumeration: 3, exploitation: 3, dependency: 3}
+  description: Models unsafe Linux capabilities in an isolated lab scenario.
+

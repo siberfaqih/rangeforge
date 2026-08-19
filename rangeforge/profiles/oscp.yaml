@@ -1,0 +1,37 @@
+id: oscp
+name: OSCP-style
+allowed_platforms:
+  - linux
+allowed_categories:
+  - enumeration
+  - initial_access
+  - credential_discovery
+  - privilege_escalation
+forbidden_categories:
+  - malware_development
+  - advanced_evasion
+  - cloud_attack
+  - container_escape
+allowed_techniques:
+  - service_enumeration
+  - service_enumeration_deep
+  - public_exploit_rce
+  - web_command_injection
+  - insecure_file_upload
+  - credential_leak_initial_access
+  - multi_step_web_rce
+  - credential_discovery_config
+  - credential_reuse
+  - ssh_credential_access
+  - nested_secret_discovery
+  - linux_sudo_misconfiguration
+  - linux_suid_misconfiguration
+  - linux_cron_misconfiguration
+  - linux_capabilities_misconfiguration
+modes:
+  standalone:
+    start_state: no_access
+    objective: root
+    minimum_steps: 3
+    maximum_steps: 6
+
