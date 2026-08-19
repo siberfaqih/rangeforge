@@ -34,4 +34,9 @@ modes:
     objective: root
     minimum_steps: 3
     maximum_steps: 6
-
+runtime_defaults:
+  linux:
+    family: linux
+    distribution: ubuntu
+    version: "24.04"
+    default_runtime: vm

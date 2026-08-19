@@ -18,6 +18,18 @@ isolated training.
   authorized training.
 - Do not add internet scanning, arbitrary target discovery, remote exploitation,
   credential attacks against real systems, malware, persistence, or evasion features.
+- RangeForge distinguishes deterministic scenario generation from runtime deployment.
+- `runtime=docker` uses Docker directly.
+- `runtime=vm` selects its backend from the normalized host OS and architecture.
+- macOS ARM64 / Apple Silicon uses UTM directly; never route UTM through Vagrant.
+- AMD64 VM hosts use Vagrant.
+- Host and guest architectures are first-class, and x86 guests must not be silently
+  emulated on ARM.
+- Images must come from configured trusted registry definitions.
+- Downloaded artifacts must be checksum-verifiable before becoming ready.
+- Image acquisition and backend-template preparation are separate lifecycle states.
+- UTM environments should prefer cloning prepared reusable base templates.
+- Phase 1 scenario generation must never depend on runtime or backend availability.
 
 Every future real primitive should eventually provide:
 
@@ -28,4 +40,3 @@ Every future real primitive should eventually provide:
 - tests
 
 Before completing a change, run `pytest`, `ruff check .`, and `mypy rangeforge`.
-

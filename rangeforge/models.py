@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -55,6 +56,8 @@ class Primitive(StrictModel):
     profiles: tuple[str, ...] = Field(min_length=1)
     difficulty: DifficultyMetadata
     description: str
+    runtime_support: tuple[Literal["docker", "vm"], ...] = ("docker", "vm")
+    architectures: tuple[Literal["arm64", "amd64"], ...] = ("arm64", "amd64")
 
 
 class ProfileMode(StrictModel):
@@ -70,6 +73,13 @@ class ProfileMode(StrictModel):
         return self
 
 
+class GuestRequirement(StrictModel):
+    family: str
+    distribution: str
+    version: str
+    default_runtime: Literal["docker", "vm"] = "vm"
+
+
 class TrainingProfile(StrictModel):
     id: str
     name: str
@@ -78,6 +88,7 @@ class TrainingProfile(StrictModel):
     forbidden_categories: tuple[str, ...] = ()
     allowed_techniques: tuple[str, ...] = Field(min_length=1)
     modes: dict[str, ProfileMode]
+    runtime_defaults: dict[str, GuestRequirement] = Field(default_factory=dict)
 
 
 class ScenarioMetadata(StrictModel):
@@ -140,4 +151,3 @@ class Scenario(StrictModel):
     machine: MachineMetadata
     attack_graph: AttackGraphSpec
     validation: ValidationResult
-
