@@ -7,7 +7,7 @@ from typing import Literal
 
 from rangeforge.artifacts.manager import ArtifactManager
 from rangeforge.cve.registry import CVERegistry
-from rangeforge.host.models import HostInfo
+from rangeforge.host.models import Architecture, HostInfo
 from rangeforge.images.manager import ImageManager
 from rangeforge.images.models import ArtifactState, TemplateState
 from rangeforge.images.resolver import ImageResolutionError, ImageResolver
@@ -16,6 +16,7 @@ from rangeforge.primitives.registry import PrimitiveRegistry
 from rangeforge.runtime.backends.docker import DockerBackend
 from rangeforge.runtime.backends.utm import UTMBackend
 from rangeforge.runtime.backends.vagrant import VagrantBackend
+from rangeforge.runtime.guest import check_guest_compatibility
 from rangeforge.runtime.models import (
     BackendStatus,
     CVEArtifactPlanStatus,
@@ -67,10 +68,6 @@ class RuntimePlanner:
             issues.append(
                 "Requested runtime does not match the scenario generation target."
             )
-        if resolution.guest_architecture.value != scenario.scenario.guest_architecture:
-            issues.append(
-                "Resolved guest architecture does not match the scenario generation target."
-            )
         backend_status = self.backend_status_provider(resolution, host)
 
         requirement = self.profile.runtime_defaults.get(scenario.scenario.platform)
@@ -83,14 +80,25 @@ class RuntimePlanner:
                 scenario, host, resolution, backend_status, issues
             )
 
+        guest_architecture = Architecture(scenario.scenario.guest_architecture)
+        guest_compatibility = check_guest_compatibility(
+            platform=scenario.scenario.platform,
+            family=requirement.family,
+            runtime=resolution.runtime,
+            backend=resolution.backend,
+            architecture=guest_architecture,
+            host=host,
+        )
+        issues.extend(guest_compatibility.errors)
+
         guest = GuestPlan(
             family=requirement.family,
             distribution=requirement.distribution,
             version=requirement.version,
-            architecture=resolution.guest_architecture,
+            architecture=guest_architecture,
         )
         image_status: ImagePlanStatus | None = None
-        if resolution.compatible:
+        if resolution.compatible and guest_compatibility.compatible:
             try:
                 manifest = self.image_resolver.resolve(
                     family=guest.family,
@@ -117,7 +125,11 @@ class RuntimePlanner:
             issues,
         )
 
-        compatible = resolution.compatible and not issues
+        compatible = (
+            resolution.compatible
+            and guest_compatibility.compatible
+            and not issues
+        )
         backend_ready = backend_status is not None and backend_status.available
         source_ready = image_status is not None and image_status.source == ArtifactState.READY
         template_ready = (

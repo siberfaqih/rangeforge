@@ -1,20 +1,26 @@
 """Locked, deterministic runtime and VM-backend selection policy."""
 
-from typing import ClassVar
+from collections.abc import Mapping
+from types import MappingProxyType
 
 from rangeforge.host.models import Architecture, HostInfo, HostOS
 from rangeforge.models import Primitive
 from rangeforge.runtime.models import RuntimeResolution, RuntimeType, VMBackend
 
-
-class RuntimeResolver:
-    _VM_MATRIX: ClassVar[dict[tuple[HostOS, Architecture], VMBackend]] = {
+# Authoritative mapping of supported host OS/architecture combinations to
+# their required VM backend. The resolver and guest capability checks share
+# this single read-only policy; neither duplicates nor widens it.
+VM_HOST_BACKENDS: Mapping[tuple[HostOS, Architecture], VMBackend] = MappingProxyType(
+    {
         (HostOS.DARWIN, Architecture.ARM64): VMBackend.UTM,
         (HostOS.DARWIN, Architecture.AMD64): VMBackend.VAGRANT,
         (HostOS.LINUX, Architecture.AMD64): VMBackend.VAGRANT,
         (HostOS.WINDOWS, Architecture.AMD64): VMBackend.VAGRANT,
     }
+)
 
+
+class RuntimeResolver:
     def resolve(
         self,
         requested: RuntimeType,
@@ -38,7 +44,7 @@ class RuntimeResolver:
                 errors=tuple(errors),
             )
 
-        backend = self._VM_MATRIX.get((host.os, host.architecture))
+        backend = VM_HOST_BACKENDS.get((host.os, host.architecture))
         if backend is None:
             errors.append(
                 "Unsupported for VM runtime in the current RangeForge version: "
