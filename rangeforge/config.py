@@ -20,6 +20,10 @@ class ImagesConfig(StrictModel):
     cache_dir: Path = Path.home() / ".rangeforge" / "images"
 
 
+class ArtifactsConfig(StrictModel):
+    cache_dir: Path = Path.home() / ".rangeforge" / "artifacts"
+
+
 class ExecutableConfig(StrictModel):
     executable: Path | None = None
 
@@ -27,6 +31,7 @@ class ExecutableConfig(StrictModel):
 class RangeForgeConfig(StrictModel):
     runtime: RuntimeConfig = RuntimeConfig()
     images: ImagesConfig = ImagesConfig()
+    artifacts: ArtifactsConfig = ArtifactsConfig()
     utm: ExecutableConfig = ExecutableConfig()
     vagrant: ExecutableConfig = ExecutableConfig()
     docker: ExecutableConfig = ExecutableConfig()

@@ -1,0 +1,9 @@
+primitive: service_enumeration
+platforms: [linux]
+architectures: [arm64, amd64]
+runtime_support:
+  - runtime: vm
+    backends: [utm, vagrant]
+    realism: real
+provisioner: provision
+validator: validate

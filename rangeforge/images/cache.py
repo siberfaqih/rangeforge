@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
-from rangeforge.images.models import ImageManifest, TemplateState
+import yaml
+from pydantic import ValidationError
+
+from rangeforge.images.models import BaseTemplate, ImageManifest, TemplateState
 from rangeforge.runtime.models import VMBackend
 
 
@@ -44,7 +47,39 @@ class ImageCache:
     def template_path(self, image_id: str, backend: VMBackend) -> Path:
         return self.templates / backend.value / image_id
 
-    def template_state(self, image_id: str, backend: VMBackend) -> TemplateState:
-        path = self.template_path(image_id, backend)
-        return TemplateState.READY if path.exists() else TemplateState.MISSING
+    def template_metadata_path(self, image_id: str, backend: VMBackend) -> Path:
+        return self.template_path(image_id, backend) / "template.yaml"
 
+    def load_template(self, image_id: str, backend: VMBackend) -> BaseTemplate | None:
+        path = self.template_metadata_path(image_id, backend)
+        if not path.is_file():
+            return None
+        try:
+            return BaseTemplate.model_validate(
+                yaml.safe_load(path.read_text(encoding="utf-8"))
+            )
+        except (OSError, yaml.YAMLError, ValidationError):
+            return None
+
+    def template_state(
+        self,
+        image_id: str,
+        backend: VMBackend,
+        current_checksum: str | None = None,
+    ) -> TemplateState:
+        template = self.load_template(image_id, backend)
+        if template is None:
+            return TemplateState.MISSING
+        if template.status is not TemplateState.READY:
+            return template.status
+        if current_checksum and template.source_checksum.lower() != current_checksum.lower():
+            return TemplateState.STALE
+        from rangeforge.images.templates import template_fingerprint
+
+        expected = template_fingerprint(
+            template.image_id,
+            template.source_checksum,
+            template.backend,
+            template.schema_version,
+        )
+        return TemplateState.READY if expected == template.fingerprint else TemplateState.STALE

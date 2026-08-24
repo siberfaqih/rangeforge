@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 import yaml
 
 from rangeforge.images.cache import ImageCache
+from rangeforge.images.downloader import HTTPSImageDownloader, ImageDownloader, ProgressCallback
 from rangeforge.images.models import (
     ArtifactState,
     ImageInspection,
     ImageManifest,
+    PullResult,
     VerificationResult,
     VerificationStatus,
 )
@@ -24,9 +27,15 @@ class ImageManagerError(ValueError):
 
 
 class ImageManager:
-    def __init__(self, registry: ImageRegistry, cache: ImageCache) -> None:
+    def __init__(
+        self,
+        registry: ImageRegistry,
+        cache: ImageCache,
+        downloader: ImageDownloader | None = None,
+    ) -> None:
         self.registry = registry
         self.cache = cache
+        self.downloader = downloader or HTTPSImageDownloader()
 
     def list(self) -> tuple[ImageInspection, ...]:
         return tuple(self.inspect(item.id) for item in self.registry.all())
@@ -46,7 +55,9 @@ class ImageManager:
             artifact_path=artifact_path,
             artifact_state=state,
             template_states={
-                backend: self.cache.template_state(image_id, backend)
+                backend: self.cache.template_state(
+                    image_id, backend, manifest.checksum.value
+                )
                 for backend in manifest.backends
             },
         )
@@ -120,13 +131,69 @@ class ImageManager:
         )
         return self.inspect(image_id)
 
-    def download(self, image_id: str) -> None:
+    def pull(
+        self,
+        image_id: str,
+        *,
+        replace_invalid: bool = False,
+        progress: ProgressCallback | None = None,
+        state_callback: Callable[[ArtifactState], None] | None = None,
+    ) -> PullResult:
         manifest = self.registry.require(image_id)
         if manifest.source.url is None:
             raise ImageManagerError(
                 f"Image '{image_id}' has no trusted download URL configured."
             )
-        raise ImageManagerError("Remote image pulling is not implemented in Phase 2A.")
+        if manifest.checksum.value is None:
+            raise ImageManagerError(
+                f"Image '{image_id}' has no trusted SHA-256 configured."
+            )
+        destination = self.cache.artifact_path(manifest)
+        if destination.exists():
+            existing = self.verify(image_id)
+            if existing.valid:
+                self._emit(state_callback, ArtifactState.READY)
+                return PullResult(
+                    inspection=self.inspect(image_id), downloaded=False, reused=True
+                )
+            if not replace_invalid:
+                raise ImageManagerError(
+                    f"Cached artifact is invalid and was not overwritten: {destination}. "
+                    "Use --replace-invalid to replace it explicitly."
+                )
+
+        self.cache.ensure()
+        partial = destination.with_name(f"{destination.name}.partial")
+        if partial.exists():
+            partial.unlink()
+        self._emit(state_callback, ArtifactState.DOWNLOADING)
+        try:
+            self.downloader.download(manifest.source.url, partial, progress)
+            self._emit(state_callback, ArtifactState.VERIFYING)
+            actual = self._sha256(partial)
+            expected = manifest.checksum.value.lower()
+            if actual != expected:
+                self._emit(state_callback, ArtifactState.INVALID)
+                raise ImageManagerError(
+                    f"Checksum mismatch for '{image_id}'. Expected {expected}, got {actual}."
+                )
+            partial.replace(destination)
+            self._write_artifact_record(manifest, destination, actual, "pulled")
+            self._emit(state_callback, ArtifactState.READY)
+            return PullResult(
+                inspection=self.inspect(image_id), downloaded=True, reused=False
+            )
+        except Exception:
+            if partial.exists():
+                partial.unlink()
+            self._emit(
+                state_callback,
+                ArtifactState.INVALID if destination.exists() else ArtifactState.MISSING,
+            )
+            raise
+
+    def download(self, image_id: str) -> None:
+        self.pull(image_id)
 
     def remove(self, image_id: str) -> bool:
         manifest = self.registry.require(image_id)
@@ -140,6 +207,32 @@ class ImageManager:
                 removed = True
         return removed
 
+    def _write_artifact_record(
+        self,
+        manifest: ImageManifest,
+        artifact: Path,
+        checksum: str,
+        origin: str,
+    ) -> None:
+        record = {
+            "image_id": manifest.id,
+            "artifact_path": str(artifact),
+            "origin": origin,
+            "sha256": checksum,
+            "state": ArtifactState.READY.value,
+        }
+        self.cache.metadata_path(manifest.id).write_text(
+            yaml.safe_dump(record, sort_keys=False), encoding="utf-8"
+        )
+
+    @staticmethod
+    def _emit(
+        callback: Callable[[ArtifactState], None] | None,
+        state: ArtifactState,
+    ) -> None:
+        if callback:
+            callback(state)
+
     @staticmethod
     def _sha256(path: Path) -> str:
         digest = hashlib.sha256()
@@ -147,4 +240,3 @@ class ImageManager:
             for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
-

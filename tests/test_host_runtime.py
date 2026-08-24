@@ -4,6 +4,7 @@ from pathlib import Path
 
 from rangeforge.host.detector import HostDetector
 from rangeforge.host.models import Architecture, HostInfo, HostOS
+from rangeforge.images.models import VagrantBox
 from rangeforge.models import Primitive
 from rangeforge.primitives.registry import PrimitiveRegistry
 from rangeforge.runtime.backends.base import CommandResult
@@ -125,3 +126,68 @@ def test_missing_backend_dependency_status() -> None:
     status = VagrantBackend(None).status()
     assert not status.available
     assert "not found" in status.details[0]
+
+
+def test_utm_backend_lifecycle_command_construction(tmp_path: Path) -> None:
+    executable = tmp_path / "utmctl"
+    executable.write_text("fixture", encoding="utf-8")
+    commands: list[tuple[str, ...]] = []
+
+    def runner(command: tuple[str, ...]) -> CommandResult:
+        commands.append(command)
+        if command[1] == "list":
+            return CommandResult(
+                returncode=0,
+                stdout="UUID Status Name\nabc stopped rf-base-image\ndef started rf-1337",
+            )
+        if command[1] == "status":
+            return CommandResult(returncode=0, stdout="started")
+        if command[1] == "ip-address":
+            return CommandResult(returncode=0, stdout="127.0.0.1\n192.168.64.5")
+        return CommandResult(returncode=0)
+
+    backend = UTMBackend(executable, runner=runner)
+    assert backend.template_exists("rf-base-image")
+    backend.clone("rf-base-image", "rf-1337")
+    backend.start("rf-1337")
+    backend.stop("rf-1337", force=True)
+    assert backend.vm_state("rf-1337").value == "running"
+    assert backend.ip_addresses("rf-1337") == ("192.168.64.5",)
+    backend.delete("rf-1337")
+    assert (str(executable), "clone", "rf-base-image", "--name", "rf-1337") in commands
+    assert (str(executable), "start", "rf-1337") in commands
+    assert (str(executable), "stop", "rf-1337", "--force") in commands
+    assert (str(executable), "delete", "rf-1337") in commands
+
+
+def test_vagrant_backend_lifecycle_command_construction(tmp_path: Path) -> None:
+    executable = tmp_path / "vagrant"
+    executable.write_text("fixture", encoding="utf-8")
+    environment = tmp_path / "environment"
+    commands: list[tuple[str, ...]] = []
+
+    def runner(command: tuple[str, ...]) -> CommandResult:
+        commands.append(command)
+        if command[1:4] == ("box", "list", "--machine-readable"):
+            return CommandResult(returncode=0, stdout="1,,box-name,ubuntu/noble64")
+        if "status" in command:
+            return CommandResult(returncode=0, stdout="1,default,state,running")
+        if "ssh-config" in command:
+            return CommandResult(returncode=0, stdout="  HostName 192.168.56.10")
+        return CommandResult(returncode=0)
+
+    backend = VagrantBackend(executable, runner=runner)
+    assert backend.box_exists("ubuntu/noble64")
+    vagrantfile = backend.prepare_environment(
+        environment, VagrantBox(name="ubuntu/noble64")
+    )
+    assert "ubuntu/noble64" in vagrantfile.read_text(encoding="utf-8")
+    backend.start(environment)
+    assert backend.vm_state(environment).value == "running"
+    assert backend.ip_addresses(environment) == ("192.168.56.10",)
+    backend.stop(environment)
+    backend.delete(environment)
+    prefix = (str(executable), "--chdir", str(environment))
+    assert (*prefix, "up") in commands
+    assert (*prefix, "halt") in commands
+    assert (*prefix, "destroy", "--force") in commands

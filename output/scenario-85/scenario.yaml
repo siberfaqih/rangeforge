@@ -1,0 +1,74 @@
+scenario:
+  id: '85'
+  seed: 85
+  profile: oscp
+  profile_name: OSCP-style
+  mode: standalone
+  platform: linux
+  difficulty: easy
+  difficulty_score: 1.25
+  generator_version: 0.3.0
+  target_runtime: vm
+  guest_architecture: arm64
+  cve_registry_version: 1
+machine:
+  hostname: web14
+  ip: 192.168.56.92
+attack_graph:
+  start: no_access
+  objective: root
+  path:
+  - service_enumeration
+  - cve_2023_46604_activemq_rce
+  - credential_discovery_config
+  - linux_sudo_misconfiguration
+  selected_primitives:
+  - id: service_enumeration
+    name: Service Enumeration
+    categories:
+    - enumeration
+    requires:
+    - no_access
+    provides: service_discovered
+    difficulty:
+      enumeration: 1
+      exploitation: 1
+      dependency: 1
+  - id: cve_2023_46604_activemq_rce
+    name: Apache ActiveMQ OpenWire RCE (CVE-2023-46604)
+    categories:
+    - initial_access
+    requires:
+    - service_discovered
+    provides: low_priv_shell
+    difficulty:
+      enumeration: 2
+      exploitation: 2
+      dependency: 2
+  - id: credential_discovery_config
+    name: Configuration Credential Discovery
+    categories:
+    - credential_discovery
+    requires:
+    - low_priv_shell
+    provides: user_shell
+    difficulty:
+      enumeration: 1
+      exploitation: 1
+      dependency: 1
+  - id: linux_sudo_misconfiguration
+    name: Sudo Misconfiguration
+    categories:
+    - privilege_escalation
+    requires:
+    - user_shell
+    provides: root
+    difficulty:
+      enumeration: 1
+      exploitation: 1
+      dependency: 1
+validation:
+  solvable: true
+  profile_violations: []
+  errors: []
+  vm_deployed: false

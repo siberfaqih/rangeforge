@@ -1,0 +1,6 @@
+objective: obtain command execution as a restricted service identity
+concepts:
+  - web service enumeration
+  - unsafe command handling
+  - service account boundaries
+success_state: low_priv_shell

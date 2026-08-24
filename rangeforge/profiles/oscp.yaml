@@ -16,6 +16,8 @@ allowed_techniques:
   - service_enumeration
   - service_enumeration_deep
   - public_exploit_rce
+  - cve_2023_46604_activemq_rce
+  - simple_web_foothold
   - web_command_injection
   - insecure_file_upload
   - credential_leak_initial_access

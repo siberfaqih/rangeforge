@@ -30,6 +30,34 @@ isolated training.
 - Image acquisition and backend-template preparation are separate lifecycle states.
 - UTM environments should prefer cloning prepared reusable base templates.
 - Phase 1 scenario generation must never depend on runtime or backend availability.
+- Source images, shared base templates, and scenario VMs are separate resources.
+- Destroying a scenario must never delete its source image or shared base template.
+- Scenario VMs should be cloned from prepared base templates whenever the backend supports it.
+- Checksum verification is mandatory before a source image can become `READY`.
+- Runtime lifecycle state belongs in scenario-specific runtime metadata, never in the attack graph.
+- Destructive lifecycle operations must validate RangeForge ownership metadata first.
+- Phase 2B base images and templates must remain clean and non-vulnerable.
+- Phase 3 vulnerability provisioning, flags, and student users belong only to owned scenario clones.
+- Attack graphs describe logical transitions only.
+- Primitive provisioners create runtime conditions; primitive validators verify them.
+- Provisioning must target only RangeForge-managed scenario resources.
+- Shared base templates and source images must never receive vulnerability provisioning.
+- Management credentials are infrastructure secrets and must never enter student attack paths.
+- Student artifacts must not expose solutions, credentials, primitive names, or flag values.
+- Runtime validity requires positive and negative checks; successful provisioning alone is not validity.
+- RangeForge never selects arbitrary internet CVEs.
+- Only curated CVE registry entries may participate in scenario generation.
+- CVE primitives are ordinary runtime primitives with additional vulnerability metadata.
+- CVE selection must respect profile, platform, runtime, backend, base guest, and architecture
+  compatibility.
+- External vulnerable service artifacts must be version-pinned and checksum-verified.
+- Do not dynamically download arbitrary exploit proofs of concept.
+- Attack graphs store state transitions, not exploit instructions.
+- CVE provisioning must target only RangeForge-managed scenario resources.
+- Base templates remain clean and must never receive CVE provisioning.
+- Scenario destroy never removes shared CVE artifacts.
+- CVE CVSS scores must not determine training difficulty.
+- AI is not a source of truth for CVE metadata, compatibility, or validation.
 
 Every future real primitive should eventually provide:
 

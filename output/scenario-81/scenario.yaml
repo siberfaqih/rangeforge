@@ -1,0 +1,71 @@
+scenario:
+  id: '81'
+  seed: 81
+  profile: oscp
+  profile_name: OSCP-style
+  mode: standalone
+  platform: linux
+  difficulty: easy
+  difficulty_score: 1.0
+  generator_version: 0.3.0
+machine:
+  hostname: ops44
+  ip: 192.168.56.152
+attack_graph:
+  start: no_access
+  objective: root
+  path:
+  - service_enumeration
+  - simple_web_foothold
+  - credential_discovery_config
+  - linux_sudo_misconfiguration
+  selected_primitives:
+  - id: service_enumeration
+    name: Service Enumeration
+    categories:
+    - enumeration
+    requires:
+    - no_access
+    provides: service_discovered
+    difficulty:
+      enumeration: 1
+      exploitation: 1
+      dependency: 1
+  - id: simple_web_foothold
+    name: Simple RangeForge Web Foothold
+    categories:
+    - initial_access
+    requires:
+    - service_discovered
+    provides: low_priv_shell
+    difficulty:
+      enumeration: 1
+      exploitation: 1
+      dependency: 1
+  - id: credential_discovery_config
+    name: Configuration Credential Discovery
+    categories:
+    - credential_discovery
+    requires:
+    - low_priv_shell
+    provides: user_shell
+    difficulty:
+      enumeration: 1
+      exploitation: 1
+      dependency: 1
+  - id: linux_sudo_misconfiguration
+    name: Sudo Misconfiguration
+    categories:
+    - privilege_escalation
+    requires:
+    - user_shell
+    provides: root
+    difficulty:
+      enumeration: 1
+      exploitation: 1
+      dependency: 1
+validation:
+  solvable: true
+  profile_violations: []
+  errors: []
+  vm_deployed: false

@@ -101,6 +101,9 @@ class ScenarioMetadata(StrictModel):
     difficulty: DifficultyLevel
     difficulty_score: float
     generator_version: str
+    target_runtime: Literal["docker", "vm"] = "vm"
+    guest_architecture: Literal["arm64", "amd64"] = "arm64"
+    cve_registry_version: int = Field(default=1, ge=1)
 
 
 class MachineMetadata(StrictModel):

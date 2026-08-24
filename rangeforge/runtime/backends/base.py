@@ -20,6 +20,10 @@ class CommandResult(StrictModel):
 CommandRunner = Callable[[tuple[str, ...]], CommandResult]
 
 
+class BackendOperationError(RuntimeError):
+    """Raised when a requested backend command fails safely."""
+
+
 def run_read_only(command: tuple[str, ...]) -> CommandResult:
     try:
         completed = subprocess.run(

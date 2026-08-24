@@ -7,7 +7,14 @@ from typer.testing import CliRunner
 from rangeforge.cli import app
 from rangeforge.host.models import Architecture
 from rangeforge.images.cache import ImageCache
-from rangeforge.images.models import Checksum, ImageManifest, ImageOS, ImageSource, ImageSourceType
+from rangeforge.images.models import (
+    ArtifactFormat,
+    Checksum,
+    ImageManifest,
+    ImageOS,
+    ImageSource,
+    ImageSourceType,
+)
 from rangeforge.images.registry import ImageRegistry
 from rangeforge.models import Scenario
 from rangeforge.runtime.models import RuntimeType, VMBackend
@@ -40,7 +47,7 @@ def test_generate_cli_dry_run(tmp_path: Path) -> None:
     assert (tmp_path / "scenario-1337" / "scenario.yaml").is_file()
 
 
-def test_generate_cli_requires_dry_run(tmp_path: Path) -> None:
+def test_generate_cli_without_dry_run_is_metadata_only(tmp_path: Path) -> None:
     result = CliRunner().invoke(
         app,
         [
@@ -59,9 +66,9 @@ def test_generate_cli_requires_dry_run(tmp_path: Path) -> None:
             str(tmp_path),
         ],
     )
-    assert result.exit_code == 2
-    assert "dry-run generation only" in result.output
-    assert not list(tmp_path.iterdir())
+    assert result.exit_code == 0, result.output
+    assert "Graph solvable" in result.output
+    assert (tmp_path / "scenario-1" / "scenario.yaml").is_file()
 
 
 def test_doctor_is_diagnostic(tmp_path: Path) -> None:
@@ -77,21 +84,60 @@ def test_doctor_is_diagnostic(tmp_path: Path) -> None:
 
 def test_images_list_cli(tmp_path: Path) -> None:
     config = tmp_path / "config.yaml"
-    config.write_text(
-        f"images:\n  cache_dir: {tmp_path / 'images'}\n", encoding="utf-8"
-    )
+    config.write_text(f"images:\n  cache_dir: {tmp_path / 'images'}\n", encoding="utf-8")
     result = CliRunner().invoke(app, ["images", "list", "--config", str(config)])
     assert result.exit_code == 0, result.output
     assert "ubuntu-24.04-arm64" in result.output
     assert "ubuntu-24.04-amd64" in result.output
 
 
+def test_artifacts_list_and_info_cli(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"artifacts:\n  cache_dir: {tmp_path / 'artifacts'}\n",
+        encoding="utf-8",
+    )
+    listing = CliRunner().invoke(app, ["artifacts", "list", "--config", str(config)])
+    assert listing.exit_code == 0, listing.output
+    assert "apache-activemq-5.18.2" in listing.output
+    assert "temurin-jre-17.0.19-linux-arm64" in listing.output
+
+    info = CliRunner().invoke(
+        app,
+        ["artifacts", "info", "apache-activemq-5.18.2", "--config", str(config)],
+    )
+    assert info.exit_code == 0, info.output
+    assert "5.18.2" in info.output
+    assert "MISSING" in info.output
+
+
+def test_cve_registry_cli(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"artifacts:\n  cache_dir: {tmp_path / 'artifacts'}\n",
+        encoding="utf-8",
+    )
+    listing = CliRunner().invoke(app, ["cve", "list"])
+    assert listing.exit_code == 0, listing.output
+    assert "CVE-2023-46604" in listing.output
+
+    info = CliRunner().invoke(
+        app,
+        ["cve", "info", "CVE-2023-46604", "--config", str(config)],
+    )
+    assert info.exit_code == 0, info.output
+    assert "Apache ActiveMQ Classic" in info.output
+    assert "MISSING" in info.output
+
+    validation = CliRunner().invoke(app, ["cve", "validate-registry"])
+    assert validation.exit_code == 0, validation.output
+    assert "registry version 1: VALID" in validation.output
+
+
 def test_runtime_plan_cli(scenario: Scenario, tmp_path: Path) -> None:
     scenario_path = ScenarioYamlSerializer().dump(scenario, tmp_path)
     config = tmp_path / "config.yaml"
-    config.write_text(
-        f"images:\n  cache_dir: {tmp_path / 'images'}\n", encoding="utf-8"
-    )
+    config.write_text(f"images:\n  cache_dir: {tmp_path / 'images'}\n", encoding="utf-8")
     result = CliRunner().invoke(
         app,
         [
@@ -121,6 +167,8 @@ def test_images_verify_cli_success(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         source=ImageSource(
             type=ImageSourceType.OFFICIAL,
             vendor="fixture",
+            artifact_format=ArtifactFormat.QCOW2,
+            version="test",
             filename="cli-test.iso",
         ),
         checksum=Checksum(value=hashlib.sha256(content).hexdigest()),
@@ -133,8 +181,6 @@ def test_images_verify_cli_success(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     config = tmp_path / "config.yaml"
     config.write_text(f"images:\n  cache_dir: {cache.root}\n", encoding="utf-8")
 
-    result = CliRunner().invoke(
-        app, ["images", "verify", manifest.id, "--config", str(config)]
-    )
+    result = CliRunner().invoke(app, ["images", "verify", manifest.id, "--config", str(config)])
     assert result.exit_code == 0, result.output
     assert "VALID" in result.output
