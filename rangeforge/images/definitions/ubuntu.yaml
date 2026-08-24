@@ -9,11 +9,13 @@
   source:
     type: official
     vendor: canonical
-    url: null
-    filename: ubuntu-24.04-arm64.iso
+    artifact_format: qcow2
+    version: "20260801"
+    url: https://cloud-images.ubuntu.com/releases/noble/release-20260801/ubuntu-24.04-server-cloudimg-arm64.img
+    filename: ubuntu-24.04-server-cloudimg-arm64-20260801.img
   checksum:
     algorithm: sha256
-    value: null
+    value: aa6da05756e85ea6dde4836b841fecb10cfd1ba3bcea320189d9af945db70476
 
 - id: ubuntu-24.04-amd64
   os:
@@ -26,9 +28,14 @@
   source:
     type: official
     vendor: canonical
-    url: null
-    filename: ubuntu-24.04-amd64.img
+    artifact_format: qcow2
+    version: "20260801"
+    url: https://cloud-images.ubuntu.com/releases/noble/release-20260801/ubuntu-24.04-server-cloudimg-amd64.img
+    filename: ubuntu-24.04-server-cloudimg-amd64-20260801.img
   checksum:
     algorithm: sha256
-    value: null
-
+    value: 0533b0655c32e68b31d792ecd6ccfca95abdbc536c4446874fe0513bd4140ffe
+  vagrant_box:
+    name: ubuntu/noble64
+    version: null
+    provider: null

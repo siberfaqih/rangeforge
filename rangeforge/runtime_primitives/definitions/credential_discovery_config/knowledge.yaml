@@ -1,0 +1,6 @@
+objective: move from a service context to a generated local user
+concepts:
+  - configuration review
+  - file permissions
+  - credential reuse within an isolated host
+success_state: user_shell

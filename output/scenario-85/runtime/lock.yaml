@@ -1,0 +1,45 @@
+schema_version: phase4-v1
+scenario_id: '85'
+seed: 85
+profile: oscp
+runtime: vm
+backend: utm
+architecture: arm64
+cve_registry_version: 1
+base_image:
+  id: ubuntu-24.04-arm64
+  fingerprint: 77eaf00b3ac9de99116f2f80e4e9396ba08a60d9a6df826a815f96d010ca8bf7
+primitives:
+- id: service_enumeration
+  version: 1
+  cve_id: null
+  service_version: null
+  artifacts: []
+- id: cve_2023_46604_activemq_rce
+  version: 1
+  cve_id: CVE-2023-46604
+  service_version: 5.18.2
+  artifacts:
+  - id: apache-activemq-5.18.2
+    filename: apache-activemq-5.18.2-bin.tar.gz
+    version: 5.18.2
+    sha256: cd3df3ec2f791d47f4351bc0e5d5f9880c220a451a31820edbf839962ec8430a
+    architectures:
+    - arm64
+    - amd64
+  - id: temurin-jre-17.0.19-linux-arm64
+    filename: OpenJDK17U-jre_aarch64_linux_hotspot_17.0.19_10.tar.gz
+    version: 17.0.19+10
+    sha256: aae834297a87736869745be7c1fca3207ea9167c5824f41c88b0ebb2e3ccb9b1
+    architectures:
+    - arm64
+- id: credential_discovery_config
+  version: 1
+  cve_id: null
+  service_version: null
+  artifacts: []
+- id: linux_sudo_misconfiguration
+  version: 1
+  cve_id: null
+  service_version: null
+  artifacts: []

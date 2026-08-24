@@ -16,6 +16,12 @@ class ImageSourceType(StrEnum):
     OFFICIAL = "official"
 
 
+class ArtifactFormat(StrEnum):
+    QCOW2 = "qcow2"
+    VAGRANT_BOX = "vagrant_box"
+    UTM_PACKAGE = "utm_package"
+
+
 class ChecksumAlgorithm(StrEnum):
     SHA256 = "sha256"
 
@@ -31,7 +37,9 @@ class ArtifactState(StrEnum):
 
 class TemplateState(StrEnum):
     MISSING = "missing"
+    PREPARING = "preparing"
     READY = "ready"
+    STALE = "stale"
     INVALID = "invalid"
 
 
@@ -51,6 +59,8 @@ class ImageOS(StrictModel):
 class ImageSource(StrictModel):
     type: ImageSourceType
     vendor: str
+    artifact_format: ArtifactFormat
+    version: str
     url: str | None = None
     filename: str
 
@@ -67,6 +77,12 @@ class Checksum(StrictModel):
     value: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
 
 
+class VagrantBox(StrictModel):
+    name: str = Field(pattern=r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+    version: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._-]+$")
+    provider: str | None = Field(default=None, pattern=r"^[A-Za-z0-9._-]+$")
+
+
 class ImageManifest(StrictModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]*$")
     os: ImageOS
@@ -75,11 +91,14 @@ class ImageManifest(StrictModel):
     backends: tuple[VMBackend, ...] = ()
     source: ImageSource
     checksum: Checksum
+    vagrant_box: VagrantBox | None = None
 
     @model_validator(mode="after")
     def vm_images_declare_a_backend(self) -> ImageManifest:
         if RuntimeType.VM in self.runtimes and not self.backends:
             raise ValueError("VM images must declare at least one supported backend")
+        if VMBackend.VAGRANT in self.backends and self.vagrant_box is None:
+            raise ValueError("Vagrant images must declare a trusted box reference")
         return self
 
 
@@ -108,5 +127,15 @@ class BaseTemplate(StrictModel):
     image_id: str
     backend: VMBackend
     architecture: Architecture
-    reference: Path | str
+    reference: str
     status: TemplateState
+    source_checksum: str
+    schema_version: int = 1
+    created_by_version: str
+    fingerprint: str
+
+
+class PullResult(StrictModel):
+    inspection: ImageInspection
+    downloaded: bool
+    reused: bool

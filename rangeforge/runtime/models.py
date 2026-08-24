@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
+
+from pydantic import Field
 
 from rangeforge.host.models import Architecture, HostInfo
 from rangeforge.models import StrictModel
@@ -30,6 +33,40 @@ class BackendCapability(StrEnum):
     VERSION_INSPECTION = "version_inspection"
     IMAGE_INSPECTION = "image_inspection"
     VM_LISTING = "vm_listing"
+    VM_CLONE = "vm_clone"
+    VM_START = "vm_start"
+    VM_STOP = "vm_stop"
+    VM_DESTROY = "vm_destroy"
+    GUEST_IP = "guest_ip"
+
+
+class VMState(StrEnum):
+    NOT_BUILT = "not_built"
+    STOPPED = "stopped"
+    STARTING = "starting"
+    RUNNING = "running"
+    ERROR = "error"
+    UNKNOWN = "unknown"
+
+
+class ManagementState(StrEnum):
+    NOT_READY = "not_ready"
+    WAITING = "waiting"
+    READY = "ready"
+    UNAVAILABLE = "unavailable"
+
+
+class ProvisioningState(StrEnum):
+    NOT_PROVISIONED = "not_provisioned"
+    PROVISIONING = "provisioning"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class RuntimeValidationState(StrEnum):
+    NOT_RUN = "not_run"
+    VALID = "valid"
+    INVALID = "invalid"
 
 
 class BackendStatus(StrictModel):
@@ -64,6 +101,21 @@ class ImagePlanStatus(StrictModel):
     template: str
 
 
+class CVEArtifactPlanStatus(StrictModel):
+    id: str
+    version: str
+    sha256: str
+    status: Literal["missing", "ready", "invalid"]
+
+
+class CVEPlanStatus(StrictModel):
+    primitive: str
+    cve_id: str
+    product: str
+    expected_version: str
+    artifacts: tuple[CVEArtifactPlanStatus, ...] = Field(min_length=1)
+
+
 class RuntimePlan(StrictModel):
     scenario_id: str
     host: HostInfo
@@ -71,8 +123,59 @@ class RuntimePlan(StrictModel):
     backend_status: BackendStatus | None = None
     guest: GuestPlan | None = None
     image_status: ImagePlanStatus | None = None
+    cve_status: tuple[CVEPlanStatus, ...] = ()
     compatible: bool
     deployable: bool
     issues: tuple[str, ...] = ()
     next_action: str
 
+
+class VMIdentity(StrictModel):
+    name: str
+    managed_id: str
+    state: VMState
+
+
+class RuntimeTemplateReference(StrictModel):
+    image_id: str
+    template_id: str
+    name: str
+    fingerprint: str
+
+
+class RuntimeGuestState(StrictModel):
+    architecture: Architecture
+    ip: str | None = None
+    management: ManagementState = ManagementState.NOT_READY
+
+
+class ProvisioningStatus(StrictModel):
+    state: ProvisioningState = ProvisioningState.NOT_PROVISIONED
+    completed_primitives: tuple[str, ...] = ()
+    active_primitive: str | None = None
+    plan_fingerprint: str | None = None
+    error: str | None = None
+
+
+class RuntimeValidationStatus(StrictModel):
+    state: RuntimeValidationState = RuntimeValidationState.NOT_RUN
+    result_path: str | None = None
+
+
+class RuntimeMetadata(StrictModel):
+    scenario_id: str
+    profile: str
+    runtime: RuntimeType
+    backend: VMBackend
+    vm: VMIdentity
+    template: RuntimeTemplateReference
+    guest: RuntimeGuestState
+    provisioning: ProvisioningStatus = ProvisioningStatus()
+    validation: RuntimeValidationStatus = RuntimeValidationStatus()
+    metadata_version: int = 2
+
+
+class LifecycleResult(StrictModel):
+    changed: bool
+    message: str
+    metadata: RuntimeMetadata | None = None

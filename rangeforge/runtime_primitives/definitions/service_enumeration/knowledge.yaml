@@ -1,0 +1,6 @@
+objective: identify the network service exposed by the isolated target
+concepts:
+  - service discovery
+  - port enumeration
+  - service identification
+success_state: service_discovered

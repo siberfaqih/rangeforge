@@ -6,19 +6,19 @@ scenario:
   mode: standalone
   platform: linux
   difficulty: medium
-  difficulty_score: 1.83
-  generator_version: 0.1.0
+  difficulty_score: 2.0
+  generator_version: 0.3.0
 machine:
-  hostname: web91
-  ip: 192.168.56.103
+  hostname: files74
+  ip: 192.168.56.159
 attack_graph:
   start: no_access
   objective: root
   path:
   - service_enumeration_deep
-  - multi_step_web_rce
-  - credential_discovery_config
-  - linux_sudo_misconfiguration
+  - web_command_injection
+  - ssh_credential_access
+  - linux_suid_misconfiguration
   selected_primitives:
   - id: service_enumeration_deep
     name: Deep Service Enumeration
@@ -31,38 +31,38 @@ attack_graph:
       enumeration: 3
       exploitation: 2
       dependency: 2
-  - id: multi_step_web_rce
-    name: Multi-step Abstract Web RCE
+  - id: web_command_injection
+    name: Abstract Web Command Injection
     categories:
     - initial_access
     requires:
     - service_discovered
     provides: low_priv_shell
     difficulty:
-      enumeration: 3
-      exploitation: 3
-      dependency: 3
-  - id: credential_discovery_config
-    name: Configuration Credential Discovery
+      enumeration: 2
+      exploitation: 2
+      dependency: 2
+  - id: ssh_credential_access
+    name: SSH Credential Access
     categories:
     - credential_discovery
     requires:
     - low_priv_shell
     provides: user_shell
     difficulty:
-      enumeration: 1
-      exploitation: 1
-      dependency: 1
-  - id: linux_sudo_misconfiguration
-    name: Sudo Misconfiguration
+      enumeration: 2
+      exploitation: 2
+      dependency: 2
+  - id: linux_suid_misconfiguration
+    name: SUID Misconfiguration
     categories:
     - privilege_escalation
     requires:
     - user_shell
     provides: root
     difficulty:
-      enumeration: 1
-      exploitation: 1
+      enumeration: 2
+      exploitation: 2
       dependency: 1
 validation:
   solvable: true

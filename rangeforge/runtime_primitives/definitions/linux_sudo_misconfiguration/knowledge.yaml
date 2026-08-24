@@ -1,0 +1,6 @@
+objective: obtain a root execution context from the generated local user
+concepts:
+  - sudo policy review
+  - command allow-list boundaries
+  - privilege escalation
+success_state: root

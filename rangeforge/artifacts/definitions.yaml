@@ -1,0 +1,47 @@
+- id: apache-activemq-5.18.2
+  type: archive
+  filename: apache-activemq-5.18.2-bin.tar.gz
+  version: 5.18.2
+  platforms: [linux]
+  architectures: [arm64, amd64]
+  source:
+    type: upstream
+    vendor: Apache Software Foundation
+    url: https://archive.apache.org/dist/activemq/5.18.2/apache-activemq-5.18.2-bin.tar.gz
+  checksum:
+    algorithm: sha256
+    value: cd3df3ec2f791d47f4351bc0e5d5f9880c220a451a31820edbf839962ec8430a
+  license: Apache-2.0
+  redistributable: false
+
+- id: temurin-jre-17.0.19-linux-arm64
+  type: archive
+  filename: OpenJDK17U-jre_aarch64_linux_hotspot_17.0.19_10.tar.gz
+  version: 17.0.19+10
+  platforms: [linux]
+  architectures: [arm64]
+  source:
+    type: official
+    vendor: Eclipse Adoptium
+    url: https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.19%2B10/OpenJDK17U-jre_aarch64_linux_hotspot_17.0.19_10.tar.gz
+  checksum:
+    algorithm: sha256
+    value: aae834297a87736869745be7c1fca3207ea9167c5824f41c88b0ebb2e3ccb9b1
+  license: GPL-2.0-with-classpath-exception
+  redistributable: false
+
+- id: temurin-jre-17.0.19-linux-amd64
+  type: archive
+  filename: OpenJDK17U-jre_x64_linux_hotspot_17.0.19_10.tar.gz
+  version: 17.0.19+10
+  platforms: [linux]
+  architectures: [amd64]
+  source:
+    type: official
+    vendor: Eclipse Adoptium
+    url: https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.19%2B10/OpenJDK17U-jre_x64_linux_hotspot_17.0.19_10.tar.gz
+  checksum:
+    algorithm: sha256
+    value: adb5a2364baa51de1ef91bb9911f5a61d24b045fe1d6647cb8050272a3a8ee75
+  license: GPL-2.0-with-classpath-exception
+  redistributable: false

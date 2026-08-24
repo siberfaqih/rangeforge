@@ -3,8 +3,11 @@
 from dataclasses import dataclass
 
 from rangeforge import __version__
+from rangeforge.cve.loader import CVELoader
+from rangeforge.cve.registry import CVERegistry
 from rangeforge.generator.randomizer import ScenarioRandomizer
 from rangeforge.graph.engine import AttackGraphEngine
+from rangeforge.host.models import Architecture
 from rangeforge.models import (
     AttackGraphSpec,
     DifficultyLevel,
@@ -17,6 +20,7 @@ from rangeforge.models import (
     ValidationResult,
 )
 from rangeforge.primitives.registry import PrimitiveRegistry
+from rangeforge.runtime.models import RuntimeType, VMBackend
 from rangeforge.validation.scenario import ScenarioValidator
 
 
@@ -50,9 +54,15 @@ def calculate_difficulty(path: tuple[Primitive, ...]) -> DifficultyAssessment:
 
 
 class ScenarioGenerator:
-    def __init__(self, profile: TrainingProfile, registry: PrimitiveRegistry) -> None:
+    def __init__(
+        self,
+        profile: TrainingProfile,
+        registry: PrimitiveRegistry,
+        cves: CVERegistry | None = None,
+    ) -> None:
         self.profile = profile
         self.registry = registry
+        self.cves = cves or CVELoader().load()
 
     def generate(
         self,
@@ -61,16 +71,43 @@ class ScenarioGenerator:
         platform: str,
         difficulty: DifficultyLevel,
         seed: int,
+        runtime: RuntimeType = RuntimeType.VM,
+        architecture: Architecture = Architecture.ARM64,
     ) -> Scenario:
         if platform not in self.profile.allowed_platforms:
             raise GenerationError(
                 f"Platform '{platform}' is not allowed by profile '{self.profile.id}'."
             )
+        if architecture is Architecture.UNSUPPORTED:
+            raise GenerationError("Unsupported guest architecture cannot generate a scenario.")
         mode_config = self.profile.modes.get(mode)
         if mode_config is None:
             raise GenerationError(f"Mode '{mode}' is not defined by profile '{self.profile.id}'.")
 
-        allowed = self.registry.allowed_for(self.profile, platform)
+        backend = (
+            None
+            if runtime is RuntimeType.DOCKER
+            else (
+                VMBackend.UTM
+                if architecture is Architecture.ARM64
+                else VMBackend.VAGRANT
+            )
+        )
+        compatible_cves = set(
+            self.cves.compatible_ids(
+                profile=self.profile,
+                platform=platform,
+                architecture=architecture,
+                runtime=runtime,
+                backend=backend,
+            )
+        )
+        allowed = tuple(
+            primitive
+            for primitive in self.registry.allowed_for(self.profile, platform)
+            if self.cves.get_by_primitive(primitive.id) is None
+            or primitive.id in compatible_cves
+        )
         engine = AttackGraphEngine(allowed)
         all_candidates = engine.candidate_paths(
             mode_config.start_state,
@@ -104,6 +141,11 @@ class ScenarioGenerator:
                 difficulty=assessment.level,
                 difficulty_score=assessment.score,
                 generator_version=__version__,
+                target_runtime=runtime.value,
+                guest_architecture=(
+                    "arm64" if architecture is Architecture.ARM64 else "amd64"
+                ),
+                cve_registry_version=self.cves.version,
             ),
             machine=MachineMetadata(hostname=hostname, ip=machine_ip),
             attack_graph=AttackGraphSpec(
@@ -125,4 +167,3 @@ class ScenarioGenerator:
     def _hostname(randomizer: ScenarioRandomizer) -> str:
         roles = ("app", "data", "files", "ops", "web")
         return f"{randomizer.choice(roles)}{randomizer.randint(1, 99):02d}"
-

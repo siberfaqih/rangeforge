@@ -9,6 +9,7 @@ from rangeforge.host.models import Architecture
 from rangeforge.images.cache import ImageCache
 from rangeforge.images.manager import ImageManager, ImageManagerError
 from rangeforge.images.models import (
+    ArtifactFormat,
     Checksum,
     ImageManifest,
     ImageOS,
@@ -31,6 +32,8 @@ def _manifest(content: bytes = b"fixture image") -> ImageManifest:
         source=ImageSource(
             type=ImageSourceType.OFFICIAL,
             vendor="fixture",
+            artifact_format=ArtifactFormat.QCOW2,
+            version="test",
             filename="test-image.iso",
         ),
         checksum=Checksum(value=hashlib.sha256(content).hexdigest()),
@@ -150,4 +153,3 @@ def test_source_and_template_readiness_are_distinct(tmp_path: Path) -> None:
     inspection = manager.import_image(source, manifest.id)
     assert inspection.artifact_state.value == "ready"
     assert inspection.template_states[VMBackend.UTM].value == "missing"
-

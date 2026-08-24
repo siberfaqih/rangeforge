@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Literal
 
+from rangeforge.artifacts.manager import ArtifactManager
+from rangeforge.cve.registry import CVERegistry
 from rangeforge.host.models import HostInfo
 from rangeforge.images.manager import ImageManager
 from rangeforge.images.models import ArtifactState, TemplateState
@@ -15,6 +18,8 @@ from rangeforge.runtime.backends.utm import UTMBackend
 from rangeforge.runtime.backends.vagrant import VagrantBackend
 from rangeforge.runtime.models import (
     BackendStatus,
+    CVEArtifactPlanStatus,
+    CVEPlanStatus,
     GuestPlan,
     ImagePlanStatus,
     RuntimePlan,
@@ -35,12 +40,16 @@ class RuntimePlanner:
         primitive_registry: PrimitiveRegistry,
         image_resolver: ImageResolver,
         image_manager: ImageManager,
+        cve_registry: CVERegistry | None = None,
+        artifact_manager: ArtifactManager | None = None,
         backend_status_provider: BackendStatusProvider | None = None,
     ) -> None:
         self.profile = profile
         self.primitive_registry = primitive_registry
         self.image_resolver = image_resolver
         self.image_manager = image_manager
+        self.cve_registry = cve_registry
+        self.artifact_manager = artifact_manager
         self.backend_status_provider = backend_status_provider or self._backend_status
 
     def plan(
@@ -54,6 +63,14 @@ class RuntimePlanner:
         primitives = self._scenario_primitives(scenario, issues)
         resolution = RuntimeResolver().resolve(requested_runtime, host, primitives)
         issues.extend(resolution.errors)
+        if resolution.runtime.value != scenario.scenario.target_runtime:
+            issues.append(
+                "Requested runtime does not match the scenario generation target."
+            )
+        if resolution.guest_architecture.value != scenario.scenario.guest_architecture:
+            issues.append(
+                "Resolved guest architecture does not match the scenario generation target."
+            )
         backend_status = self.backend_status_provider(resolution, host)
 
         requirement = self.profile.runtime_defaults.get(scenario.scenario.platform)
@@ -93,6 +110,13 @@ class RuntimePlanner:
             except ImageResolutionError as exc:
                 issues.append(str(exc))
 
+        cve_status = self._cve_status(
+            scenario,
+            resolution,
+            guest,
+            issues,
+        )
+
         compatible = resolution.compatible and not issues
         backend_ready = backend_status is not None and backend_status.available
         source_ready = image_status is not None and image_status.source == ArtifactState.READY
@@ -103,7 +127,18 @@ class RuntimePlanner:
                 and image_status.template == TemplateState.READY
             )
         )
-        deployable = compatible and backend_ready and source_ready and template_ready
+        cve_artifacts_ready = all(
+            artifact.status == "ready"
+            for cve in cve_status
+            for artifact in cve.artifacts
+        )
+        deployable = (
+            compatible
+            and backend_ready
+            and source_ready
+            and template_ready
+            and cve_artifacts_ready
+        )
         return RuntimePlan(
             scenario_id=scenario.scenario.id,
             host=host,
@@ -111,6 +146,7 @@ class RuntimePlanner:
             backend_status=backend_status,
             guest=guest,
             image_status=image_status,
+            cve_status=cve_status,
             compatible=compatible,
             deployable=deployable,
             issues=tuple(dict.fromkeys(issues)),
@@ -119,8 +155,76 @@ class RuntimePlanner:
                 backend_status,
                 image_status,
                 issues,
+                cve_status,
             ),
         )
+
+    def _cve_status(
+        self,
+        scenario: Scenario,
+        resolution: RuntimeResolution,
+        guest: GuestPlan,
+        issues: list[str],
+    ) -> tuple[CVEPlanStatus, ...]:
+        selected = []
+        if self.cve_registry is None:
+            return ()
+        if scenario.scenario.cve_registry_version != self.cve_registry.version:
+            issues.append(
+                "Scenario CVE registry version does not match the installed registry."
+            )
+        for primitive_id in scenario.attack_graph.path:
+            item = self.cve_registry.get_by_primitive(primitive_id)
+            if item is None:
+                continue
+            manifest = item.manifest
+            if not manifest.supports(
+                profile=scenario.scenario.profile,
+                platform=scenario.scenario.platform,
+                architecture=guest.architecture,
+                runtime=resolution.runtime,
+                backend=resolution.backend,
+                family=guest.family,
+                distribution=guest.distribution,
+                version=guest.version,
+            ):
+                issues.append(
+                    f"CVE primitive '{primitive_id}' is incompatible with "
+                    f"{resolution.runtime.value}/{guest.architecture.value}."
+                )
+            if self.artifact_manager is None:
+                issues.append("CVE artifact manager is unavailable.")
+                continue
+            artifacts = []
+            for artifact_id in manifest.artifact_ids_for(guest.architecture):
+                inspection = self.artifact_manager.inspect(artifact_id)
+                artifact_status: Literal["missing", "ready", "invalid"] = (
+                    "ready"
+                    if inspection.state is ArtifactState.READY
+                    else (
+                        "missing"
+                        if inspection.state is ArtifactState.MISSING
+                        else "invalid"
+                    )
+                )
+                artifacts.append(
+                    CVEArtifactPlanStatus(
+                        id=artifact_id,
+                        version=inspection.manifest.version,
+                        sha256=inspection.manifest.checksum.value.lower(),
+                        status=artifact_status,
+                    )
+                )
+            selected.append(
+                CVEPlanStatus(
+                    primitive=primitive_id,
+                    cve_id=manifest.cve.id,
+                    product=manifest.cve.product,
+                    expected_version=manifest.service.expected_version,
+                    artifacts=tuple(artifacts),
+                )
+            )
+        return tuple(selected)
 
     def _scenario_primitives(
         self, scenario: Scenario, issues: list[str]
@@ -161,6 +265,7 @@ class RuntimePlanner:
         backend_status: BackendStatus | None,
         image_status: ImagePlanStatus | None,
         issues: list[str],
+        cve_status: tuple[CVEPlanStatus, ...],
     ) -> str:
         if issues:
             return "Resolve compatibility errors before deployment."
@@ -168,7 +273,7 @@ class RuntimePlanner:
             backend = resolution.backend.value if resolution.backend else resolution.runtime.value
             return f"Install or start the required {backend} backend."
         if image_status is None or image_status.source == ArtifactState.MISSING:
-            return "Import a trusted, checksum-verifiable source image."
+            return "Pull or import the trusted, checksum-verifiable source image."
         if image_status.source != ArtifactState.READY:
             return "Verify the source image before preparing a backend template."
         if (
@@ -176,8 +281,12 @@ class RuntimePlanner:
             and image_status.template != TemplateState.READY
         ):
             backend = resolution.backend.value.upper() if resolution.backend else "VM"
-            return f"Prepare the reusable {backend} base template."
-        return "Runtime prerequisites are ready; deployment remains disabled in Phase 2A."
+            return f"Prepare or register the reusable {backend} base template."
+        for cve in cve_status:
+            for artifact in cve.artifacts:
+                if artifact.status != "ready":
+                    return f"Run: rangeforge artifacts pull {artifact.id}"
+        return "Runtime prerequisites are ready for the scenario lifecycle."
 
     @staticmethod
     def _incomplete_plan(
@@ -197,4 +306,3 @@ class RuntimePlanner:
             issues=tuple(dict.fromkeys(issues)),
             next_action="Add a profile guest requirement before deployment planning.",
         )
-

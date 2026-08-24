@@ -34,6 +34,18 @@
   difficulty: {enumeration: 1, exploitation: 1, dependency: 1}
   description: Models initial shell access through an abstract public exploit; no CVE is installed.
 
+- id: simple_web_foothold
+  name: Simple RangeForge Web Foothold
+  categories: [initial_access]
+  platforms: [linux]
+  requires:
+    states: [service_discovered]
+  provides:
+    state: low_priv_shell
+  profiles: [oscp]
+  difficulty: {enumeration: 1, exploitation: 1, dependency: 1}
+  description: Demonstrates command execution in a purpose-built isolated training service.
+
 - id: web_command_injection
   name: Abstract Web Command Injection
   categories: [initial_access]
@@ -177,4 +189,3 @@
   profiles: [oscp]
   difficulty: {enumeration: 3, exploitation: 3, dependency: 3}
   description: Models unsafe Linux capabilities in an isolated lab scenario.
-
