@@ -326,7 +326,7 @@ def test_utm_and_vagrant_guest_transport_commands_are_scenario_scoped(
         if command[1:3] == ("file", "pull"):
             return CommandResult(
                 returncode=0,
-                stdout="RF_CHECK fixture 1\nRF_TRANSPORT_COMPLETE",
+                stdout="RF_CHECK fixture 1\nRF_TRANSPORT_COMPLETE:0",
             )
         return CommandResult(returncode=0)
 
@@ -340,6 +340,9 @@ def test_utm_and_vagrant_guest_transport_commands_are_scenario_scoped(
     assert all("rf-base" not in item for command in commands for item in command)
     assert any(command[1:3] == ("file", "push") for command in commands)
     assert any(command[1] == "exec" and "rf-81" in command for command in commands)
+    framed_script = next(iter(uploaded.values()))
+    assert "(\necho fixture\n)" in framed_script
+    assert "RF_TRANSPORT_COMPLETE:%s" in framed_script
 
     vagrant_commands: list[tuple[str, ...]] = []
 
@@ -366,3 +369,30 @@ def test_utm_and_vagrant_guest_transport_commands_are_scenario_scoped(
             "sudo -n /bin/bash -s",
         )
     ]
+
+
+def test_utm_guest_transport_preserves_guest_exit_status() -> None:
+    uploaded: dict[str, str] = {}
+
+    def runner(command: tuple[str, ...], script: str, timeout: float) -> CommandResult:
+        if command[1:3] == ("file", "push"):
+            uploaded[command[-1]] = script
+            return CommandResult(returncode=0)
+        if command[1:3] == ("file", "pull") and command[-1].endswith(".sh"):
+            return CommandResult(returncode=0, stdout=uploaded[command[-1]].strip())
+        if command[1:3] == ("file", "pull"):
+            return CommandResult(
+                returncode=0,
+                stdout="provisioner failed\nRF_TRANSPORT_COMPLETE:23",
+            )
+        return CommandResult(returncode=0)
+
+    result = UTMGuestTransport(
+        Path("/usr/local/bin/utmctl"),
+        "rf-81",
+        runner=runner,
+        sleeper=lambda _: None,
+    ).execute("exit 23")
+
+    assert result.returncode == 23
+    assert "provisioner failed" in result.stdout

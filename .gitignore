@@ -8,3 +8,8 @@ dist/
 *.egg-info/
 .DS_Store
 **/.DS_Store
+output/*/runtime/instructor.json
+output/*/runtime/provisioning-plan.json
+output/*/runtime/runtime.yaml
+output/*/runtime/validation.json
+output/*/student/

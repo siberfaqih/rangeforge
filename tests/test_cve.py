@@ -236,6 +236,16 @@ def test_cve_manifest_registry_and_id_validation() -> None:
         CVEManifest.model_validate(invalid)
 
 
+def test_activemq_reprovision_reclaims_previous_install_before_extracting() -> None:
+    script = Path(
+        "rangeforge/cve/definitions/CVE-2023-46604/provision.sh"
+    ).read_text(encoding="utf-8")
+
+    cleanup = "rm -rf /opt/rangeforge/activemq-5.18.2"
+    extract = 'tar -xzf "$activemq_archive"'
+    assert script.index(cleanup) < script.index(extract)
+
+
 def test_profile_architecture_runtime_and_base_compatibility(
     profile: TrainingProfile,
 ) -> None:

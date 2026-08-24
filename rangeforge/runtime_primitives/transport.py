@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable
@@ -19,6 +20,8 @@ from rangeforge.runtime.models import RuntimeMetadata, VMBackend
 
 GuestCommandRunner = Callable[[tuple[str, ...], str, float], CommandResult]
 GuestFileRunner = Callable[[tuple[str, ...], bytes, float], CommandResult]
+
+_COMPLETION_PATTERN = re.compile(r"^RF_TRANSPORT_COMPLETE:(\d+)$", re.MULTILINE)
 
 
 def run_guest_command(command: tuple[str, ...], script: str, timeout: float) -> CommandResult:
@@ -91,8 +94,12 @@ class UTMGuestTransport:
             f"rm -f /root/.rangeforge-*.out\n"
             f"exec >{result_path} 2>&1\n"
             "trap 'rm -f -- \"$0\"' EXIT\n"
+            "(\n"
             + script
-            + "\nprintf 'RF_TRANSPORT_COMPLETE\\n'\n"
+            + "\n)\n"
+            "rf_transport_status=$?\n"
+            "printf 'RF_TRANSPORT_COMPLETE:%s\\n' \"$rf_transport_status\"\n"
+            "exit \"$rf_transport_status\"\n"
         )
         upload_command = (
             str(self.executable),
@@ -150,11 +157,12 @@ class UTMGuestTransport:
         while time.monotonic() <= deadline:
             self.sleeper(1.0)
             pulled_result = self.runner(result_command, "", timeout)
-            if (
-                pulled_result.returncode == 0
-                and "RF_TRANSPORT_COMPLETE" in pulled_result.stdout
-            ):
-                return pulled_result
+            if pulled_result.returncode == 0:
+                completion = _COMPLETION_PATTERN.search(pulled_result.stdout)
+                if completion is not None:
+                    return pulled_result.model_copy(
+                        update={"returncode": int(completion.group(1))}
+                    )
         return pulled_result.model_copy(
             update={
                 "returncode": 1,

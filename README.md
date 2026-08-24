@@ -12,11 +12,12 @@ of Phase 3's scenario-scoped runtime primitive engine. The first curated definit
 Apache ActiveMQ Classic 5.18.2 affected by CVE-2023-46604 on ARM64/UTM and AMD64/Vagrant.
 Selection, provisioning, and validation remain limited to owned local lab clones.
 
-The framework and offline test suite are implemented. A real Apple Silicon UTM run installed
-and started the pinned service as a non-root account, but final RangeForge validation and the
-destroy/rebuild gate have not passed yet. The prepared VM also identifies itself as Ubuntu
-26.04 even though its template metadata says Ubuntu 24.04. Therefore Phase 4 runtime support
-is **not yet complete** and the base template must be corrected before certification.
+Phase 4 is runtime-validated on Apple Silicon with a clean Ubuntu 24.04.4 ARM64 UTM
+template. A real owned scenario clone installed the checksum-pinned service as a non-root
+account, passed every primitive, flag, and negative validator, and passed a complete
+destroy/rebuild cycle with identical scenario, lockfile, provisioning-plan, and validation
+fingerprints. AMD64/Vagrant remains covered by schema and offline fixtures but has not been
+executed on a real x86 host.
 
 Supported inputs are:
 
@@ -455,11 +456,10 @@ mypy rangeforge
 
 RangeForge does not automate interactive UTM guest installation or cloud-init seed creation;
 the clean, management-ready UTM base must currently be prepared explicitly and then
-registered. The available UTM template has an unresolved metadata mismatch: it is registered
-as Ubuntu 24.04 but the guest reports Ubuntu 26.04. The ActiveMQ service started during an
-ARM64 run, but final CVE validation and the rebuild determinism gate were not completed, so
-that runtime is not certified. AMD64/Vagrant has schema and offline fixture coverage only and
-has not been executed on a real x86 host.
+registered. The current stable UTM template was verified as Ubuntu 24.04.4 and passed the
+real ARM64 CVE lifecycle. AMD64/Vagrant has schema and offline fixture coverage only and has
+not been executed on a real x86 host. UTM guest-agent file transfer is reliable but slow for
+the two approximately 45 MB cached archives.
 
 Phase 3 temporarily uses the backend-discovered VM network for the student target; a dedicated
 student/attack network remains future work. Docker CVE deployment, Windows guests, Active
