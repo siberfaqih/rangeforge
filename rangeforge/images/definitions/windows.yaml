@@ -1,0 +1,46 @@
+# Windows 11 guest definitions (Phase 5.2).
+#
+# Windows media is manual-only. The ARM64 identity is pinned to the operator-
+# reviewed official Microsoft 25H2 v2 media used to prepare the clean UTM base.
+# Reviewed 2026-08-25 from the local bootable ISO: SHA-256 via `shasum -a 256`;
+# ISO9660 volume label `CCCOMA_A64FRE_EN-US_DV9` via `file`/`hdiutil imageinfo`.
+# AMD64 remains checksum-pending until an operator on a supported x86 host
+# reviews official media and prepares a local Vagrant box explicitly.
+#
+- id: windows-11-arm64
+  os:
+    family: windows
+    distribution: windows
+    version: "11"
+  architecture: arm64
+  runtimes: [vm]
+  backends: [utm]
+  source:
+    type: official
+    vendor: microsoft
+    acquisition: manual
+    artifact_format: iso
+    version: "25H2-v2"
+    filename: Win11_25H2_English_Arm64_v2.iso
+  checksum:
+    algorithm: sha256
+    value: 638aa2c88e94385b00f4f178d071e3df0b7d9e335577a83bd533b7f2eb65adf0
+
+- id: windows-11-amd64
+  os:
+    family: windows
+    distribution: windows
+    version: "11"
+  architecture: amd64
+  runtimes: [vm]
+  backends: [vagrant]
+  source:
+    type: official
+    vendor: microsoft
+    acquisition: manual
+    artifact_format: iso
+    version: "11"
+    filename: windows-11-amd64.iso
+  checksum:
+    algorithm: sha256
+    value: null

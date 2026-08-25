@@ -7,11 +7,12 @@ import json
 from typing import Protocol
 
 import yaml
+from pydantic import ValidationError
 
 from rangeforge import __version__
 from rangeforge.images.cache import ImageCache
 from rangeforge.images.manager import ImageManager, ImageManagerError
-from rangeforge.images.models import BaseTemplate, TemplateState
+from rangeforge.images.models import BaseTemplate, TemplateState, VagrantBox
 from rangeforge.runtime.models import VMBackend
 
 TEMPLATE_SCHEMA_VERSION = 1
@@ -71,6 +72,13 @@ class TemplateManager:
             raise ImageManagerError(f"{backend.value.upper()} backend is unavailable.")
 
         stable_reference = reference or self._default_reference(image_id, backend)
+        if backend is VMBackend.VAGRANT:
+            try:
+                VagrantBox(name=stable_reference)
+            except ValidationError as exc:
+                raise ImageManagerError(
+                    f"Invalid Vagrant box reference: {stable_reference!r}."
+                ) from exc
         existing = self.cache.load_template(image_id, backend)
         expected_fingerprint = template_fingerprint(
             image_id, verification.expected_sha256, backend
@@ -147,6 +155,8 @@ class TemplateManager:
         manifest = self.image_manager.registry.require(image_id)
         if backend is VMBackend.VAGRANT:
             if manifest.vagrant_box is None:
-                raise ImageManagerError("Trusted Vagrant box metadata is missing.")
+                raise ImageManagerError(
+                    "Manual Vagrant images require an explicit --template-name."
+                )
             return manifest.vagrant_box.name
         return template_id(image_id)

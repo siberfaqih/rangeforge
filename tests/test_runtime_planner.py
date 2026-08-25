@@ -6,12 +6,23 @@ from pathlib import Path
 from rangeforge.host.models import Architecture, HostInfo, HostOS, RuntimeExecutables
 from rangeforge.images.cache import ImageCache
 from rangeforge.images.manager import ImageManager
+from rangeforge.images.models import (
+    ArtifactFormat,
+    Checksum,
+    ImageAcquisitionMethod,
+    ImageManifest,
+    ImageOS,
+    ImageSource,
+    ImageSourceType,
+    VagrantBox,
+)
 from rangeforge.images.registry import ImageRegistry
 from rangeforge.images.resolver import ImageResolver
 from rangeforge.models import (
     AccessState,
     AttackGraphSpec,
     DifficultyLevel,
+    GuestRequirement,
     MachineMetadata,
     Scenario,
     ScenarioMetadata,
@@ -38,22 +49,144 @@ def _host() -> HostInfo:
     )
 
 
+def _amd64_host(os: HostOS = HostOS.WINDOWS) -> HostInfo:
+    return HostInfo(
+        os=os,
+        architecture=Architecture.AMD64,
+        apple_silicon=False,
+        executables=RuntimeExecutables(),
+    )
+
+
 def _utm_ready(_: RuntimeResolution, __: HostInfo) -> BackendStatus:
     return BackendStatus(backend=BackendType.UTM, available=True)
+
+
+def _vagrant_ready(_: RuntimeResolution, __: HostInfo) -> BackendStatus:
+    return BackendStatus(backend=BackendType.VAGRANT, available=True)
+
+
+def _utm_unavailable(_: RuntimeResolution, __: HostInfo) -> BackendStatus:
+    return BackendStatus(backend=BackendType.UTM, available=False)
+
+
+def _windows_profile(profile: TrainingProfile) -> TrainingProfile:
+    """Isolated in-memory profile that allows Windows 11 VM guests."""
+    return profile.model_copy(
+        update={
+            "allowed_platforms": ("linux", "windows"),
+            "runtime_defaults": {
+                "linux": profile.runtime_defaults["linux"],
+                "windows": GuestRequirement(
+                    family="windows",
+                    distribution="windows",
+                    version="11",
+                    default_runtime="vm",
+                ),
+            },
+        }
+    )
+
+
+def _windows_scenario(*, architecture: str, scenario_id: str = "windows-plan") -> Scenario:
+    return Scenario(
+        scenario=ScenarioMetadata(
+            id=scenario_id,
+            seed=1337,
+            profile="oscp",
+            profile_name="OSCP-style",
+            mode="standalone",
+            platform="windows",
+            difficulty=DifficultyLevel.MEDIUM,
+            difficulty_score=2.0,
+            generator_version="test",
+            target_runtime="vm",
+            guest_architecture=architecture,
+        ),
+        machine=MachineMetadata(hostname="victim", ip="10.10.10.10"),
+        attack_graph=AttackGraphSpec(
+            start=AccessState.NO_ACCESS,
+            objective=AccessState.ROOT,
+            path=(),
+            selected_primitives=(),
+        ),
+        validation=ValidationResult(solvable=True),
+    )
+
+
+def _registry_with_windows_amd64_fixture() -> ImageRegistry:
+    """Return the shipped checksum-pending AMD64/Vagrant identity."""
+    return ImageRegistry.load()
+
+
+def _registry_with_reviewed_manual_windows_arm64() -> ImageRegistry:
+    """Standalone registry with a manual ARM64 identity whose media identity
+    carries a (fixture) reviewed SHA-256, so import guidance applies."""
+    return ImageRegistry(
+        (
+            ImageManifest(
+                id="windows-11-arm64",
+                os=ImageOS(family="windows", distribution="windows", version="11"),
+                architecture=Architecture.ARM64,
+                runtimes=(RuntimeType.VM,),
+                backends=(VMBackend.UTM,),
+                source=ImageSource(
+                    type=ImageSourceType.OFFICIAL,
+                    vendor="microsoft",
+                    artifact_format=ArtifactFormat.ISO,
+                    version="11",
+                    filename="windows-11-arm64-reviewed.iso",
+                    acquisition=ImageAcquisitionMethod.MANUAL,
+                ),
+                checksum=Checksum(value="d" * 64),
+            ),
+        )
+    )
+
+
+def _registry_with_backend_managed_windows_amd64() -> ImageRegistry:
+    """Standalone registry with a backend-managed AMD64/Vagrant identity."""
+    return ImageRegistry(
+        (
+            ImageManifest(
+                id="windows-11-amd64",
+                os=ImageOS(family="windows", distribution="windows", version="11"),
+                architecture=Architecture.AMD64,
+                runtimes=(RuntimeType.VM,),
+                backends=(VMBackend.VAGRANT,),
+                source=ImageSource(
+                    type=ImageSourceType.OFFICIAL,
+                    vendor="microsoft",
+                    artifact_format=ArtifactFormat.ISO,
+                    version="11",
+                    filename="windows-11-amd64-box.iso",
+                    acquisition=ImageAcquisitionMethod.BACKEND_MANAGED,
+                ),
+                checksum=Checksum(value="e" * 64),
+                vagrant_box=VagrantBox(name="rangeforge-fixtures/windows-11"),
+            ),
+        )
+    )
 
 
 def _planner(
     profile: TrainingProfile,
     registry: PrimitiveRegistry,
     tmp_path: Path,
+    *,
+    image_registry: ImageRegistry | None = None,
+    backend_status_provider: object = None,
 ) -> RuntimePlanner:
-    image_registry = ImageRegistry.load()
+    resolved_image_registry = image_registry or ImageRegistry.load()
+    provider = backend_status_provider or _utm_ready
     return RuntimePlanner(
         profile=profile,
         primitive_registry=registry,
-        image_resolver=ImageResolver(image_registry),
-        image_manager=ImageManager(image_registry, ImageCache(tmp_path / "images")),
-        backend_status_provider=_utm_ready,
+        image_resolver=ImageResolver(resolved_image_registry),
+        image_manager=ImageManager(
+            resolved_image_registry, ImageCache(tmp_path / "images")
+        ),
+        backend_status_provider=provider,  # type: ignore[arg-type]
     )
 
 
@@ -91,12 +224,14 @@ def test_same_scenario_produces_same_runtime_plan(
     assert first_hash == second_hash
 
 
-def test_runtime_plan_rejects_windows_guest(
+def test_runtime_plan_windows_guest_with_unresolvable_image_fails_closed(
     profile: TrainingProfile,
     registry: PrimitiveRegistry,
     tmp_path: Path,
 ) -> None:
-    """Windows guests must be rejected even if a profile declared a requirement."""
+    """A native Windows VM guest passes capability checks in Phase 5.2; this
+    request fails closed only because its guest requirement still points at
+    an Ubuntu distribution for which no Windows image exists."""
     windows_profile = profile.model_copy(
         update={
             "allowed_platforms": ("linux", "windows"),
@@ -155,7 +290,8 @@ def test_runtime_plan_rejects_windows_guest(
     plan = planner.plan(scenario, requested_runtime=RuntimeType.VM, host=windows_host)
     assert not plan.compatible
     assert not plan.deployable
-    assert any("does not support runtime" in issue for issue in plan.issues)
+    assert not any("does not support runtime" in issue for issue in plan.issues)
+    assert any("No image matches" in issue for issue in plan.issues)
     assert plan.guest is not None
     assert plan.guest.family == "windows"
     assert plan.image_status is None
@@ -334,3 +470,191 @@ def test_runtime_plan_preserves_linux_compatibility(
     assert plan.guest.family == "linux"
     assert plan.guest.image_id == "ubuntu-24.04-arm64"
     assert not any("guest platform" in issue.lower() for issue in plan.issues)
+
+
+def test_runtime_plan_windows_arm64_on_macos_utm_is_compatible_not_deployable(
+    profile: TrainingProfile,
+    registry: PrimitiveRegistry,
+    tmp_path: Path,
+) -> None:
+    """macOS ARM64 + Windows 11 ARM64 resolves VM/UTM/windows-11-arm64.
+
+    Missing manual media keeps the plan compatible but never deployable,
+    and the next action directs the operator to import reviewed media.
+    """
+    plan = _planner(_windows_profile(profile), registry, tmp_path).plan(
+        _windows_scenario(architecture="arm64"),
+        requested_runtime=RuntimeType.VM,
+        host=_host(),
+    )
+    assert plan.compatible
+    assert not plan.deployable
+    assert plan.runtime.backend is VMBackend.UTM
+    assert plan.runtime.guest_architecture is Architecture.ARM64
+    assert plan.guest is not None
+    assert plan.guest.family == "windows"
+    assert plan.guest.distribution == "windows"
+    assert plan.guest.version == "11"
+    assert plan.guest.image_id == "windows-11-arm64"
+    assert plan.image_status is not None
+    assert plan.image_status.acquisition == "manual"
+    assert plan.image_status.source == "missing"
+    assert plan.image_status.template == "missing"
+    assert plan.next_action == "Import the trusted, checksum-verifiable source image."
+
+
+def test_runtime_plan_windows_amd64_request_on_arm64_host_is_incompatible(
+    profile: TrainingProfile,
+    registry: PrimitiveRegistry,
+    tmp_path: Path,
+) -> None:
+    """macOS ARM64 requesting Windows 11 AMD64 fails closed with no
+    architecture substitution and no image resolution."""
+    plan = _planner(_windows_profile(profile), registry, tmp_path).plan(
+        _windows_scenario(architecture="amd64"),
+        requested_runtime=RuntimeType.VM,
+        host=_host(),
+    )
+    assert not plan.compatible
+    assert not plan.deployable
+    # Backend selection follows host policy; the requested guest
+    # architecture is preserved verbatim and never substituted.
+    assert plan.runtime.backend is VMBackend.UTM
+    assert plan.runtime.guest_architecture is Architecture.AMD64
+    assert any(
+        "silent cross-architecture emulation" in issue for issue in plan.issues
+    )
+    assert plan.guest is not None
+    assert plan.guest.architecture is Architecture.AMD64
+    assert plan.image_status is None
+
+
+def test_runtime_plan_windows_amd64_on_vagrant_host_with_shipped_identity(
+    profile: TrainingProfile,
+    registry: PrimitiveRegistry,
+    tmp_path: Path,
+) -> None:
+    """AMD64 hosts resolve Vagrant/windows-11-amd64 from the shipped identity.
+
+    The fixture identity carries no reviewed trust data, so the plan stays
+    compatible but never deployable.
+    """
+    plan = _planner(
+        _windows_profile(profile),
+        registry,
+        tmp_path,
+        image_registry=_registry_with_windows_amd64_fixture(),
+        backend_status_provider=_vagrant_ready,
+    ).plan(
+        _windows_scenario(architecture="amd64"),
+        requested_runtime=RuntimeType.VM,
+        host=_amd64_host(HostOS.LINUX),
+    )
+    assert plan.compatible
+    assert not plan.deployable
+    assert plan.runtime.backend is VMBackend.VAGRANT
+    assert plan.runtime.guest_architecture is Architecture.AMD64
+    assert plan.guest is not None
+    assert plan.guest.image_id == "windows-11-amd64"
+    assert plan.image_status is not None
+    assert plan.image_status.acquisition == "manual"
+    assert plan.image_status.source == "missing"
+    assert plan.next_action == (
+        "This image has no reviewed SHA-256; configure a reviewed checksum "
+        "before its source media can become ready."
+    )
+
+
+def test_runtime_plan_manual_image_with_reviewed_checksum_directs_import(
+    profile: TrainingProfile,
+    registry: PrimitiveRegistry,
+    tmp_path: Path,
+) -> None:
+    """A manual image with a configured (reviewed) checksum directs the
+    operator to import media; it stays non-deployable until they do."""
+    plan = _planner(
+        _windows_profile(profile),
+        registry,
+        tmp_path,
+        image_registry=_registry_with_reviewed_manual_windows_arm64(),
+        backend_status_provider=_utm_ready,
+    ).plan(
+        _windows_scenario(architecture="arm64", scenario_id="reviewed-import"),
+        requested_runtime=RuntimeType.VM,
+        host=_host(),
+    )
+    assert plan.compatible
+    assert not plan.deployable
+    assert plan.guest is not None
+    assert plan.guest.image_id == "windows-11-arm64"
+    assert plan.image_status is not None
+    assert plan.image_status.source == "missing"
+    assert plan.next_action == "Import the trusted, checksum-verifiable source image."
+
+
+def test_runtime_plan_backend_managed_image_directs_backend_preparation(
+    profile: TrainingProfile,
+    registry: PrimitiveRegistry,
+    tmp_path: Path,
+) -> None:
+    """Backend-managed sources direct operators to their VM backend, not to
+    RangeForge download/import flows."""
+    plan = _planner(
+        _windows_profile(profile),
+        registry,
+        tmp_path,
+        image_registry=_registry_with_backend_managed_windows_amd64(),
+        backend_status_provider=_vagrant_ready,
+    ).plan(
+        _windows_scenario(architecture="amd64", scenario_id="backend-managed"),
+        requested_runtime=RuntimeType.VM,
+        host=_amd64_host(HostOS.LINUX),
+    )
+    assert plan.compatible
+    assert not plan.deployable
+    assert plan.guest is not None
+    assert plan.guest.image_id == "windows-11-amd64"
+    assert plan.next_action == "Prepare the source image through the vagrant backend."
+
+
+def test_same_windows_scenario_produces_same_runtime_plan(
+    profile: TrainingProfile,
+    registry: PrimitiveRegistry,
+    tmp_path: Path,
+) -> None:
+    """Windows runtime planning must be deterministic for identical inputs."""
+    planner = _planner(_windows_profile(profile), registry, tmp_path)
+    windows_scenario = _windows_scenario(architecture="arm64")
+    first = planner.plan(windows_scenario, requested_runtime=RuntimeType.VM, host=_host())
+    second = planner.plan(windows_scenario, requested_runtime=RuntimeType.VM, host=_host())
+    assert first == second
+    first_hash = hashlib.sha256(first.model_dump_json().encode()).hexdigest()
+    second_hash = hashlib.sha256(second.model_dump_json().encode()).hexdigest()
+    assert first_hash == second_hash
+
+
+def test_runtime_plan_missing_backend_keeps_compatibility_and_image(
+    profile: TrainingProfile,
+    registry: PrimitiveRegistry,
+    tmp_path: Path,
+) -> None:
+    """Backend absence makes the plan non-deployable without changing the
+    selected backend or the resolved image."""
+    plan = _planner(
+        _windows_profile(profile),
+        registry,
+        tmp_path,
+        backend_status_provider=_utm_unavailable,
+    ).plan(
+        _windows_scenario(architecture="arm64"),
+        requested_runtime=RuntimeType.VM,
+        host=_host(),
+    )
+    assert plan.compatible
+    assert not plan.deployable
+    assert plan.backend_status is not None
+    assert not plan.backend_status.available
+    assert plan.runtime.backend is VMBackend.UTM
+    assert plan.guest is not None
+    assert plan.guest.image_id == "windows-11-arm64"
+    assert plan.next_action == "Install or start the required utm backend."

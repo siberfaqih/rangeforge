@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from rangeforge.host.models import HostInfo
+from rangeforge.images.models import VagrantBox
 from rangeforge.images.templates import TemplateManager
 from rangeforge.models import Scenario
 from rangeforge.runtime.backends.base import BackendOperationError
@@ -96,14 +97,13 @@ class ScenarioLifecycle:
             if not self.vagrant.available():
                 raise LifecycleError("Vagrant backend required but Vagrant is unavailable.")
             manifest = self.template_manager.image_manager.registry.require(template.image_id)
-            if manifest.vagrant_box is None:
-                raise LifecycleError("Trusted Vagrant box metadata is missing.")
+            box = manifest.vagrant_box or VagrantBox(name=template.reference)
             if store.vagrant_directory.exists():
                 raise LifecycleError(
                     "Refusing to claim an existing Vagrant runtime directory without metadata."
                 )
             self.vagrant.prepare_environment(
-                store.vagrant_directory, manifest.vagrant_box, name
+                store.vagrant_directory, box, name
             )
 
         metadata = RuntimeMetadata(

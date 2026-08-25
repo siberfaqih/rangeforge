@@ -89,6 +89,21 @@ def test_images_list_cli(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "ubuntu-24.04-arm64" in result.output
     assert "ubuntu-24.04-amd64" in result.output
+    assert "windows-11-arm64" in result.output
+    assert "windows-11-amd64" in result.output
+    assert "MANUAL" in result.output
+
+
+def test_windows_image_info_displays_acquisition_and_checksum(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text(f"images:\n  cache_dir: {tmp_path / 'images'}\n", encoding="utf-8")
+    result = CliRunner().invoke(
+        app,
+        ["images", "info", "windows-11-arm64", "--config", str(config)],
+    )
+    assert result.exit_code == 0, result.output
+    assert "MANUAL" in result.output
+    assert "638aa2c88e94385b00f4f178d071e3df" in result.output
 
 
 def test_artifacts_list_and_info_cli(tmp_path: Path) -> None:

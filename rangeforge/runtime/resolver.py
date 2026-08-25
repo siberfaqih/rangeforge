@@ -26,7 +26,20 @@ class RuntimeResolver:
         requested: RuntimeType,
         host: HostInfo,
         primitives: tuple[Primitive, ...] = (),
+        *,
+        guest_architecture: Architecture | None = None,
     ) -> RuntimeResolution:
+        """Resolve runtime/backend policy for a host.
+
+        ``guest_architecture`` records the scenario-requested guest
+        architecture on the resolution when provided; it never influences
+        host or backend selection, which come exclusively from
+        ``VM_HOST_BACKENDS``. When omitted, the guest architecture falls
+        back to the host architecture for backward compatibility.
+        """
+        effective_guest_architecture = (
+            guest_architecture if guest_architecture is not None else host.architecture
+        )
         errors = self._primitive_errors(requested, host.architecture, primitives)
         if host.os is HostOS.UNSUPPORTED or host.architecture is Architecture.UNSUPPORTED:
             errors.append(
@@ -38,7 +51,7 @@ class RuntimeResolver:
             return RuntimeResolution(
                 runtime=requested,
                 backend=None,
-                guest_architecture=host.architecture,
+                guest_architecture=effective_guest_architecture,
                 compatible=not errors,
                 reason=reason,
                 errors=tuple(errors),
@@ -58,7 +71,7 @@ class RuntimeResolver:
         return RuntimeResolution(
             runtime=requested,
             backend=backend,
-            guest_architecture=host.architecture,
+            guest_architecture=effective_guest_architecture,
             compatible=backend is not None and not errors,
             reason=reason,
             errors=tuple(dict.fromkeys(errors)),

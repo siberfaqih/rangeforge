@@ -97,6 +97,7 @@ class GuestPlan(StrictModel):
 
 
 class ImagePlanStatus(StrictModel):
+    acquisition: str
     source: str
     template: str
 

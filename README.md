@@ -165,6 +165,17 @@ backend selection is automatic and follows this initial host policy:
 RangeForge does not route UTM through Vagrant and does not silently emulate AMD64 guests
 on ARM. Docker compatibility is evaluated separately from the VM matrix.
 
+Windows 11 uses the same generic VM pipeline as Linux. Guest architecture is explicit and
+never substituted:
+
+| Guest identity | Native host policy | VM backend |
+|---|---|---|
+| `windows-11-arm64` | macOS ARM64 | UTM directly |
+| `windows-11-amd64` | supported AMD64 host | Vagrant |
+
+Windows Docker guests, cross-architecture emulation, Windows Server roles, production
+Windows attack graphs, and Windows management transport remain default-deny.
+
 The first vulnerable primitive chain is VM-backed. Docker remains part of the generic
 runtime architecture but is not accepted by these Phase 3 implementations.
 
@@ -229,6 +240,13 @@ for both ARM64 and AMD64. Pulls stream only the configured HTTPS URL into a `.pa
 file, verify it, and atomically rename it. Existing valid files are reused; existing
 invalid files require explicit `--replace-invalid`.
 
+Windows 11 installation media uses manual acquisition. `windows-11-arm64` pins the
+operator-reviewed official Microsoft 25H2 v2 ARM64 ISO checksum. The AMD64 identity is
+present for deterministic Vagrant compatibility planning but remains checksum-pending
+until official media and a clean local Vagrant base are reviewed on a supported x86 host.
+RangeForge does not scrape Microsoft pages, discover dynamic ISO URLs, redistribute
+Windows media, or bypass licensing or activation.
+
 Available image commands are:
 
 ```bash
@@ -238,6 +256,10 @@ rangeforge images pull ubuntu-24.04-arm64
 rangeforge images import ~/Downloads/image.img --image ubuntu-24.04-arm64
 rangeforge images verify ubuntu-24.04-arm64
 rangeforge images prepare ubuntu-24.04-arm64
+rangeforge images import ~/Downloads/Win11_25H2_English_Arm64_v2.iso \
+  --image windows-11-arm64
+rangeforge images prepare windows-11-arm64 --backend utm \
+  --template-name rf-base-windows-11-arm64
 ```
 
 Local imports use the same mandatory checksum. A mismatch fails before the artifact is
@@ -257,7 +279,9 @@ It never claims an OS installation succeeded. The base must contain QEMU Guest A
 support for `utmctl ip-address` and Phase 3 guest command/file transport.
 
 For Vagrant, the trusted manifest maps Ubuntu AMD64 to a configured box reference.
-RangeForge records metadata while Vagrant retains ownership of its box cache.
+RangeForge records metadata while Vagrant retains ownership of its box cache. Manual
+Vagrant images such as Windows AMD64 require an explicitly named existing local box;
+the registered template fingerprint remains bound to the verified source checksum.
 
 ### Scenario VM lifecycle
 
@@ -454,17 +478,18 @@ mypy rangeforge
 
 ## Current limitations and roadmap
 
-RangeForge does not automate interactive UTM guest installation or cloud-init seed creation;
-the clean, management-ready UTM base must currently be prepared explicitly and then
-registered. The current stable UTM template was verified as Ubuntu 24.04.4 and passed the
-real ARM64 CVE lifecycle. AMD64/Vagrant has schema and offline fixture coverage only and has
-not been executed on a real x86 host. UTM guest-agent file transfer is reliable but slow for
-the two approximately 45 MB cached archives.
+RangeForge does not automate interactive UTM guest installation, Windows installation, or
+cloud-init seed creation; clean base templates must be prepared explicitly and registered.
+The current stable Ubuntu UTM template passed the real ARM64 CVE lifecycle. Windows 11 ARM64
+image compatibility and manual source/template readiness are supported, but Windows guest
+management and provisioning remain Phase 5.3 work. AMD64/Vagrant Windows behavior has
+offline coverage only and has not been executed on a real x86 host. UTM guest-agent file
+transfer is reliable but slow for the two approximately 45 MB cached archives.
 
 Phase 3 temporarily uses the backend-discovered VM network for the student target; a dedicated
-student/attack network remains future work. Docker CVE deployment, Windows guests, Active
-Directory, cloud ranges, arbitrary targets, dynamic CVE/PoC discovery, and AI-driven validity
-decisions remain out of scope.
+student/attack network remains future work. Docker CVE deployment, Windows attack graphs and
+management transport, Active Directory, cloud ranges, arbitrary targets, dynamic CVE/PoC
+discovery, and AI-driven validity decisions remain out of scope.
 
 ## Security and authorization
 

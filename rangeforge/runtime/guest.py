@@ -4,9 +4,10 @@ Guest platform knowledge is data-driven and centralized here so runtime
 planning can make deterministic compatibility decisions without hardcoding
 platform transitions anywhere else. Valid host/runtime/backend combinations
 are reused from the authoritative runtime resolver policy instead of being
-duplicated as independent sets. Windows support is intentionally
-default-deny in this phase: no runtime, architecture, language, or role is
-enabled.
+duplicated as independent sets. Windows guests are recognized for VM-based
+compatibility planning on native ARM64/AMD64 hosts only; Docker, member-server
+and domain-controller roles, and execution languages remain denied, and no
+cross-architecture emulation is permitted.
 """
 
 from __future__ import annotations
@@ -71,11 +72,19 @@ _LINUX_CAPABILITIES = GuestCapabilities(
     roles=(GuestRole.STANDALONE,),
 )
 
-# Phase 5.1: Windows guests are recognized as a typed platform but remain
-# non-deployable. No runtime, architecture, language, or role is enabled;
-# every compatibility check must fail closed.
+# Phase 5.2: Windows guests are recognized for VM-based compatibility
+# planning on native ARM64/AMD64 hosts. Docker, member-server and
+# domain-controller roles, and execution languages remain denied, and
+# cross-architecture emulation stays forbidden. Deployment readiness is
+# separately gated on reviewed media checksums; capability metadata never
+# makes an image ready.
 _WINDOWS_CAPABILITIES = GuestCapabilities(
     platform=GuestPlatform.WINDOWS,
+    runtimes=(RuntimeType.VM,),
+    architectures=(Architecture.ARM64, Architecture.AMD64),
+    roles=(GuestRole.STANDALONE,),
+    execution_languages=(),
+    cross_architecture_emulation=False,
 )
 
 GUEST_CAPABILITIES: Mapping[GuestPlatform, GuestCapabilities] = MappingProxyType(

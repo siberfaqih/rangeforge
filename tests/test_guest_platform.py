@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from rangeforge.host.models import Architecture, HostInfo, HostOS, RuntimeExecutables
 from rangeforge.runtime.guest import (
@@ -66,12 +67,39 @@ class TestGuestCapabilities:
             guest_capabilities(GuestPlatform.LINUX).cross_architecture_emulation is False
         )
 
-    def test_windows_is_default_deny(self) -> None:
+    def test_windows_capability_matrix(self) -> None:
+        """Windows is VM-only, native-architecture-only, standalone-only."""
         caps = guest_capabilities(GuestPlatform.WINDOWS)
-        assert caps.runtimes == ()
-        assert caps.architectures == ()
+        assert caps.runtimes == (RuntimeType.VM,)
+        assert caps.architectures == (Architecture.ARM64, Architecture.AMD64)
+        assert caps.roles == (GuestRole.STANDALONE,)
         assert caps.execution_languages == ()
-        assert caps.roles == ()
+        assert caps.cross_architecture_emulation is False
+
+    def test_windows_docker_stays_denied(self) -> None:
+        caps = guest_capabilities(GuestPlatform.WINDOWS)
+        assert RuntimeType.DOCKER not in caps.runtimes
+
+    def test_windows_server_roles_stay_denied(self) -> None:
+        caps = guest_capabilities(GuestPlatform.WINDOWS)
+        assert GuestRole.MEMBER_SERVER not in caps.roles
+        assert GuestRole.DOMAIN_CONTROLLER not in caps.roles
+
+    def test_windows_execution_languages_stay_denied(self) -> None:
+        caps = guest_capabilities(GuestPlatform.WINDOWS)
+        for language in ExecutionLanguage:
+            assert language not in caps.execution_languages
+
+    def test_windows_capability_metadata_is_immutable(self) -> None:
+        caps = guest_capabilities(GuestPlatform.WINDOWS)
+        with pytest.raises(ValidationError):
+            caps.runtimes = (RuntimeType.DOCKER,)  # type: ignore[misc]
+
+    def test_windows_capabilities_are_stable_across_lookups(self) -> None:
+        first = guest_capabilities(GuestPlatform.WINDOWS)
+        second = guest_capabilities(GuestPlatform.WINDOWS)
+        assert first == second
+        assert first is second
 
     def test_unknown_platform_raises(self) -> None:
         with pytest.raises(GuestCompatibilityError):
@@ -241,6 +269,34 @@ class TestCheckGuestCompatibilityBackendPolicy:
 
 
 class TestCheckGuestCompatibilityWindows:
+    """Explicit Windows capability matrix: VM-only, native-arch, standalone."""
+
+    def test_windows_vm_arm64_native_on_macos_utm_is_compatible(self) -> None:
+        result = check_guest_compatibility(
+            platform="windows",
+            family="windows",
+            runtime=RuntimeType.VM,
+            backend=VMBackend.UTM,
+            architecture=Architecture.ARM64,
+            host=_host(),
+        )
+        assert result.compatible
+        assert result.platform is GuestPlatform.WINDOWS
+        assert result.errors == ()
+
+    def test_windows_vm_amd64_native_on_vagrant_host_is_compatible(self) -> None:
+        for host_os in (HostOS.LINUX, HostOS.WINDOWS):
+            result = check_guest_compatibility(
+                platform="windows",
+                family="windows",
+                runtime=RuntimeType.VM,
+                backend=VMBackend.VAGRANT,
+                architecture=Architecture.AMD64,
+                host=_host(os=host_os, architecture=Architecture.AMD64),
+            )
+            assert result.compatible
+            assert result.errors == ()
+
     def test_windows_docker_is_rejected(self) -> None:
         result = check_guest_compatibility(
             platform="windows",
@@ -254,44 +310,90 @@ class TestCheckGuestCompatibilityWindows:
         assert result.platform is GuestPlatform.WINDOWS
         assert any("does not support runtime" in error for error in result.errors)
 
-    def test_windows_vm_utm_is_rejected(self) -> None:
+    def test_windows_amd64_guest_on_arm64_host_is_rejected(self) -> None:
         result = check_guest_compatibility(
             platform="windows",
             family="windows",
             runtime=RuntimeType.VM,
             backend=VMBackend.UTM,
-            architecture=Architecture.ARM64,
+            architecture=Architecture.AMD64,
             host=_host(),
         )
         assert not result.compatible
-        assert any("does not support runtime" in error for error in result.errors)
-        assert any("does not support guest architecture" in error for error in result.errors)
+        assert any(
+            "silent cross-architecture emulation" in error for error in result.errors
+        )
 
-    def test_windows_vm_vagrant_amd64_is_rejected(self) -> None:
+    def test_windows_arm64_guest_on_amd64_host_is_rejected(self) -> None:
         result = check_guest_compatibility(
             platform="windows",
             family="windows",
             runtime=RuntimeType.VM,
             backend=VMBackend.VAGRANT,
-            architecture=Architecture.AMD64,
+            architecture=Architecture.ARM64,
             host=_host(os=HostOS.WINDOWS, architecture=Architecture.AMD64),
         )
         assert not result.compatible
-        assert any("does not support runtime" in error for error in result.errors)
-        assert any("does not support guest architecture" in error for error in result.errors)
+        assert any(
+            "silent cross-architecture emulation" in error for error in result.errors
+        )
 
-    def test_windows_rejection_is_deterministic(self) -> None:
+    def test_windows_cross_architecture_rejection_is_deterministic(self) -> None:
         args: dict[str, object] = {
             "platform": "windows",
             "family": "windows",
             "runtime": RuntimeType.VM,
-            "backend": VMBackend.VAGRANT,
+            "backend": VMBackend.UTM,
             "architecture": Architecture.AMD64,
-            "host": _host(os=HostOS.WINDOWS, architecture=Architecture.AMD64),
+            "host": _host(),
         }
         first = check_guest_compatibility(**args)  # type: ignore[arg-type]
         second = check_guest_compatibility(**args)  # type: ignore[arg-type]
         assert first == second
+
+    def test_windows_vm_with_wrong_backend_on_arm64_is_rejected(self) -> None:
+        result = check_guest_compatibility(
+            platform="windows",
+            family="windows",
+            runtime=RuntimeType.VM,
+            backend=VMBackend.VAGRANT,
+            architecture=Architecture.ARM64,
+            host=_host(),
+        )
+        assert not result.compatible
+        assert any(
+            "'vagrant' is not valid for host darwin/arm64; 'utm' is required."
+            in error
+            for error in result.errors
+        )
+
+    def test_windows_vm_with_wrong_backend_on_amd64_is_rejected(self) -> None:
+        result = check_guest_compatibility(
+            platform="windows",
+            family="windows",
+            runtime=RuntimeType.VM,
+            backend=VMBackend.UTM,
+            architecture=Architecture.AMD64,
+            host=_host(os=HostOS.WINDOWS, architecture=Architecture.AMD64),
+        )
+        assert not result.compatible
+        assert any(
+            "'utm' is not valid for host windows/amd64; 'vagrant' is required."
+            in error
+            for error in result.errors
+        )
+
+    def test_windows_vm_without_backend_is_rejected(self) -> None:
+        result = check_guest_compatibility(
+            platform="windows",
+            family="windows",
+            runtime=RuntimeType.VM,
+            backend=None,
+            architecture=Architecture.ARM64,
+            host=_host(),
+        )
+        assert not result.compatible
+        assert any("requires a VM backend" in error for error in result.errors)
 
 
 class TestCheckGuestCompatibilityArchitecture:
