@@ -1,233 +1,226 @@
 # RangeForge
 
-RangeForge is a curriculum-aware, attack-graph-driven procedural cyber-range scenario
-generator for controlled and authorized offensive-security training. It turns a training
-profile and data-defined attack primitives into a reproducible, statically validated
-scenario definition.
+RangeForge is a deterministic, curriculum-aware cyber-range generator for controlled and
+authorized offensive-security training. It builds reproducible attack-graph scenarios from
+training profiles and data-defined primitives, validates every selected path, and keeps
+logical scenario generation separate from runtime deployment.
 
-## Current status
+> RangeForge is intended only for isolated systems you own or are explicitly authorized to
+> test. It does not scan networks, discover arbitrary targets, or provision remote systems.
 
-Phase 5.2 is complete. Windows 11 is represented through the existing generic guest,
-image, runtime-planning, and backend lifecycle rather than a parallel Windows subsystem.
-On Apple Silicon, `windows-11-arm64` resolves natively to UTM with manual, checksum-pinned
-Microsoft installation media. Its source artifact and reusable
-`rf-base-windows-11-arm64` template have been verified `READY`, and repeated local plans
-are deterministic, compatible, and deployable. `windows-11-amd64` resolves only to
-Vagrant on supported AMD64 hosts and remains fail-closed until reviewed media and an
-explicit clean local box are registered.
+## Current support
 
-Production generation remains Linux-only and default-deny for Windows. Phase 5.2 does
-not add Windows attack graphs, installation automation, guest credentials, provisioning,
-or management transport; those concerns remain separate, with management transport
-reserved for Phase 5.3.
+| Capability | Status |
+|---|---|
+| Deterministic standalone scenario generation | Supported |
+| Production training platform | Linux |
+| Production profile | `oscp` |
+| Difficulty levels | `easy`, `medium`, `hard` |
+| VM runtime on macOS ARM64 | UTM directly |
+| VM runtime on supported AMD64 hosts | Vagrant |
+| Ubuntu 24.04 ARM64 and AMD64 images | Supported |
+| Windows 11 ARM64 image planning and readiness | Supported with manual media and UTM |
+| Windows 11 AMD64 compatibility planning | Supported; media and local Vagrant base remain operator-supplied |
+| Windows scenario generation and provisioning | Not enabled |
+| Curated CVE runtime | CVE-2023-46604 on owned Linux scenario clones |
+| Docker runtime model | Supported; current vulnerable primitives remain VM-only |
 
-Phase 4 adds a versioned, default-deny CVE registry and a trusted artifact lifecycle on top
-of Phase 3's scenario-scoped runtime primitive engine. The first curated definition models
-Apache ActiveMQ Classic 5.18.2 affected by CVE-2023-46604 on ARM64/UTM and AMD64/Vagrant.
-Selection, provisioning, and validation remain limited to owned local lab clones.
+Windows is represented by the same generic guest, image, planner, template, and backend
+models as Linux. There is no parallel Windows runtime architecture. Production profile
+policy remains default-deny for Windows attack graphs, management transport, credentials,
+and provisioning.
 
-Phase 4 is runtime-validated on Apple Silicon with a clean Ubuntu 24.04.4 ARM64 UTM
-template. A real owned scenario clone installed the checksum-pinned service as a non-root
-account, passed every primitive, flag, and negative validator, and passed a complete
-destroy/rebuild cycle with identical scenario, lockfile, provisioning-plan, and validation
-fingerprints. AMD64/Vagrant remains covered by schema and offline fixtures but has not been
-executed on a real x86 host.
+## Core guarantees
 
-Supported inputs are:
-
-- profile: `oscp`
-- mode: `standalone`
-- platform: `linux`
-- difficulty: `easy`, `medium`, or `hard`
-- deployment: local VM provisioning for the first runtime-capable chain
-
-The OSCP-style profile is a configurable training profile, not an authoritative
-representation of any certification vendor's exam.
+- One seeded randomizer owns every generation-time random decision.
+- The same seed, profile, mode, platform, runtime, architecture, and generator version
+  produce the same logical scenario.
+- Training-profile policy is separate from generic graph traversal.
+- Techniques are data-defined primitives with declared state transitions.
+- Generated paths are statically validated before they are accepted.
+- Runtime planning is deterministic and has no deployment side effects.
+- Host and guest architectures are explicit; RangeForge never silently substitutes or
+  emulates another architecture.
+- Source artifacts, reusable base templates, and scenario VMs are separate resources.
+- A source artifact cannot become `READY` without checksum verification.
+- Vulnerability provisioning targets only RangeForge-owned scenario clones, never source
+  images or shared base templates.
+- Scenario destruction validates ownership and preserves shared images, templates, and CVE
+  artifacts.
+- AI is never a source of truth for scenario validity, curriculum eligibility, image
+  compatibility, CVE metadata, or runtime validation.
 
 ## Architecture
 
+### Scenario generation
+
 ```text
 Training Profile
-      ↓
+      |
 Primitive Registry (default deny)
-      ↓
+      |
 NetworkX Attack Graph
-      ↓
+      |
 Seeded Scenario Generator
-      ↓
+      |
 Static Scenario Validator
-      ↓
+      |
 scenario.yaml
 ```
 
-Runtime planning is a separate pipeline:
+Profiles define curriculum rules. Primitive YAML files define `requires` and `provides`
+states, categories, techniques, architecture support, runtime support, and difficulty
+dimensions. The graph engine only connects declared transitions and remains independent of
+certification-specific policy.
+
+### Runtime planning
 
 ```text
 Host Detection
-      ↓
-Runtime Resolution
-      ↓
-Backend Resolution
-      ↓
+      |
+Runtime and Backend Resolution
+      |
 Profile Guest Requirement
-      ↓
-Trusted Image Registry
-      ↓
-Image Cache / Template Readiness
-      ↓
+      |
+Guest Compatibility Policy
+      |
+Trusted Image Resolution
+      |
+Source and Template Inspection
+      |
 Runtime Plan
-      ↓
-Prepared Base Template
-      ↓
-Scenario VM Clone / Lifecycle
 ```
 
-Phase 3 provisioning is a third, explicit pipeline:
+A runtime plan reports the selected backend, exact guest architecture, image identity,
+acquisition method, source readiness, template readiness, compatibility, deployability,
+issues, and the next required action. Planning never creates or changes a VM.
+
+### Owned runtime lifecycle
 
 ```text
-Validated Attack Graph
-      ↓
-Runtime Primitive Resolver
-      ↓
-Scenario-ordered Provisioning Plan
-      ↓
-Owned Scenario VM (never the base template)
-      ↓
-Primitive Provisioners
-      ↓
-Primitive Validators + Negative Checks
-      ↓
+Verified Source Artifact
+      |
+Registered Clean Base Template
+      |
+Owned Scenario VM
+      |
+Scenario-ordered Runtime Primitives
+      |
+Positive and Negative Validators
+      |
 VALID or INVALID
 ```
 
-Phase 4 CVE resolution is data-driven and happens before deployment:
+Attack graphs contain logical transitions, not guest commands. Runtime primitive manifests
+map selected techniques to provisioners and validators only after platform, architecture,
+runtime, and backend compatibility has been established.
+
+### Curated CVE resolution
 
 ```text
 Curated CVE Registry
-      ↓
-Profile + Platform + Runtime + Backend + Architecture Filtering
-      ↓
+      |
+Profile, Platform, Guest, Runtime, Backend, and Architecture Filtering
+      |
 Seeded Primitive Selection
-      ↓
+      |
 Version-pinned Artifact Registry
-      ↓
+      |
 Checksum-verified Shared Cache
-      ↓
+      |
 Scenario Runtime Lock
-      ↓
-Owned Clone Provisioning + Layered Runtime Validation
+      |
+Owned Clone Provisioning and Runtime Validation
 ```
 
-Profiles own curriculum rules. Primitive YAML files own state transitions. The graph
-engine only connects declared `requires` and `provides` states, so it remains independent
-of any certification. The validator separately checks policy, state continuity, graph
-length, and objective reachability.
+RangeForge never selects arbitrary internet CVEs or downloads public exploit proofs of
+concept. CVSS is metadata, not a training-difficulty input.
 
-All random choices use one `random.Random` instance owned by `ScenarioRandomizer`.
-For a fixed generator version, the same inputs and seed reproduce the same logical YAML.
+## Requirements
 
-### Difficulty
+- Python 3.11 or newer
+- UTM with `utmctl` for VM runtime on Apple Silicon
+- Vagrant for VM runtime on supported AMD64 hosts
+- Docker only when using compatible Docker-backed content
 
-Each primitive declares enumeration, exploitation, and dependency complexity from 1 to 3.
-RangeForge averages those dimensions for each primitive and then averages the complete
-path. Scores `<= 1.50` are easy, `<= 2.35` are medium, and higher scores are hard. The
-generator selects only paths whose calculated difficulty matches the requested level.
+Runtime tools are optional for scenario generation. Generation remains available even when
+no VM backend is installed.
 
-## Install and run
-
-Python 3.11 or newer is required.
+## Installation
 
 ```bash
 python -m pip install -e '.[dev]'
+rangeforge doctor
+```
 
+`rangeforge doctor` normalizes the host OS and architecture, detects Docker, UTM, and
+Vagrant, reports the selected VM backend, and inspects the image-cache path without creating
+or modifying runtime resources.
+
+## Quick start
+
+Generate and statically validate a Linux scenario:
+
+```bash
 rangeforge generate \
   --profile oscp \
   --mode standalone \
   --platform linux \
   --difficulty medium \
-  --seed 1337
+  --seed 1337 \
+  --runtime vm \
+  --architecture arm64
 ```
 
-The command writes `output/scenario-1337/scenario.yaml` and prints its validation result.
-An example attack graph is:
-
-```text
-NO_ACCESS
-  ↓ service_enumeration
-SERVICE_DISCOVERED
-  ↓ web_command_injection
-LOW_PRIV_SHELL
-  ↓ credential_discovery_config
-USER_SHELL
-  ↓ linux_suid_misconfiguration
-ROOT
-```
-
-## Runtime architecture
-
-Docker and VM are first-class runtime types. Docker always uses Docker directly. VM
-backend selection is automatic and follows this initial host policy:
-
-| Host | VM backend |
-|---|---|
-| macOS ARM64 / Apple Silicon | UTM, directly |
-| macOS AMD64 | Vagrant |
-| Linux AMD64 | Vagrant |
-| Windows AMD64 | Vagrant |
-| Other combinations | Explicitly unsupported |
-
-RangeForge does not route UTM through Vagrant and does not silently emulate AMD64 guests
-on ARM. Docker compatibility is evaluated separately from the VM matrix.
-
-Windows 11 uses the same generic VM pipeline as Linux. Guest architecture is explicit and
-never substituted:
-
-| Guest identity | Native host policy | VM backend |
-|---|---|---|
-| `windows-11-arm64` | macOS ARM64 | UTM directly |
-| `windows-11-amd64` | supported AMD64 host | Vagrant |
-
-Windows Docker guests, cross-architecture emulation, Windows Server roles, production
-Windows attack graphs, and Windows management transport remain default-deny.
-
-The first vulnerable primitive chain is VM-backed. Docker remains part of the generic
-runtime architecture but is not accepted by these Phase 3 implementations.
-
-UTM discovers `utmctl` through `PATH` and the UTM application bundle and supports direct
-clone, start, stop, status, IP discovery, and delete commands. Vagrant supports trusted
-box inspection and scenario-scoped environment lifecycle commands. Docker remains a
-separate runtime and is not part of the Phase 2B VM lifecycle.
-
-### Host diagnostics
-
-```bash
-rangeforge doctor
-```
-
-This reports normalized OS/architecture, Apple Silicon status, detected executables,
-the selected VM backend, and image-cache status. It does not create the cache or modify
-host configuration.
-
-### Runtime plans
+The output is written to `output/scenario-1337/scenario.yaml`. Inspect its runtime plan
+before making any lifecycle change:
 
 ```bash
 rangeforge runtime plan output/scenario-1337/scenario.yaml
-rangeforge runtime plan output/scenario-1337/scenario.yaml --runtime docker
 ```
 
-A plan combines the scenario's primitive compatibility, the profile's data-defined guest
-requirement, host policy, backend readiness, image resolution, and cache state. Planning
-is deterministic for the same scenario, host model, registry, and cache state. It never
-deploys anything.
+When the plan reports `Deployable: YES`, the owned lifecycle is:
 
-## Images and cache
+```bash
+rangeforge build output/scenario-1337/scenario.yaml
+rangeforge up output/scenario-1337/scenario.yaml
+rangeforge provision output/scenario-1337/scenario.yaml
+rangeforge validate output/scenario-1337/scenario.yaml
+rangeforge status output/scenario-1337/scenario.yaml
+rangeforge destroy output/scenario-1337/scenario.yaml
+```
 
-Trusted manifests under `rangeforge/images/definitions/` define guest OS, architecture,
-runtime/backend compatibility, vendor source metadata, artifact name, and SHA-256
-metadata. Python code never invents or searches for image URLs.
+`build` creates an owned scenario resource from a registered clean base. `up` starts it and
+refreshes backend state. `provision` applies the scenario-ordered runtime primitives and then
+validates them. `destroy` removes only the owned scenario VM or scenario-local Vagrant
+environment.
 
-The default cache root is `~/.rangeforge/images` and is configurable through
-`~/.config/rangeforge/config.yaml`:
+## Host and guest compatibility
+
+VM backend selection follows the normalized host, not user preference:
+
+| Host | VM backend |
+|---|---|
+| macOS ARM64 / Apple Silicon | UTM directly |
+| macOS AMD64 | Vagrant |
+| Linux AMD64 | Vagrant |
+| Windows AMD64 | Vagrant |
+| Other combinations | Unsupported |
+
+Windows image identities are exact and architecture-specific:
+
+| Image | Guest architecture | Backend | Acquisition |
+|---|---|---|---|
+| `windows-11-arm64` | ARM64 | UTM | Manual, checksum-pinned media |
+| `windows-11-amd64` | AMD64 | Vagrant | Manual, checksum-pending media |
+
+`windows-11-amd64` remains compatible but non-deployable until a reviewed checksum and an
+existing clean local Vagrant box are registered on a supported AMD64 host. RangeForge never
+converts an AMD64 request into ARM64 or routes UTM through Vagrant.
+
+## Configuration
+
+The default configuration path is `~/.config/rangeforge/config.yaml`:
 
 ```yaml
 runtime:
@@ -244,112 +237,98 @@ docker:
   executable: null
 ```
 
-The cache separates `downloads/`, backend-specific `templates/`, and `metadata/`.
-A verified ISO or source artifact being ready does not mean a reusable UTM template is
-ready. Vagrant integrations may later delegate box storage to Vagrant rather than copy
-boxes into RangeForge's cache.
+An explicit configuration can be supplied with `--config` on runtime and administrative
+commands.
 
-The registry pins Canonical's 2026-08-01 Ubuntu 24.04 cloud-image release and SHA-256
-for both ARM64 and AMD64. Pulls stream only the configured HTTPS URL into a `.partial`
-file, verify it, and atomically rename it. Existing valid files are reused; existing
-invalid files require explicit `--replace-invalid`.
+## Images and reusable templates
 
-Windows 11 installation media uses manual acquisition. `windows-11-arm64` pins the
-operator-reviewed official Microsoft 25H2 v2 ARM64 ISO checksum. The AMD64 identity is
-present for deterministic Vagrant compatibility planning but remains checksum-pending
-until official media and a clean local Vagrant base are reviewed on a supported x86 host.
-RangeForge does not scrape Microsoft pages, discover dynamic ISO URLs, redistribute
-Windows media, or bypass licensing or activation.
+Trusted manifests under `rangeforge/images/definitions/` define guest product, architecture,
+runtime/backend compatibility, vendor metadata, acquisition method, filename, and checksum.
+RangeForge never scrapes vendor pages or discovers image URLs dynamically.
 
-Available image commands are:
+The image cache separates:
+
+```text
+downloads/              verified source artifacts
+templates/<backend>/    reusable template metadata
+metadata/               source acquisition records
+```
+
+Source readiness does not imply template readiness. A reusable template is registered only
+after its source is checksum-verified and the backend confirms that the clean template
+resource exists.
+
+Common image commands:
 
 ```bash
 rangeforge images list
 rangeforge images info ubuntu-24.04-arm64
 rangeforge images pull ubuntu-24.04-arm64
-rangeforge images import ~/Downloads/image.img --image ubuntu-24.04-arm64
 rangeforge images verify ubuntu-24.04-arm64
 rangeforge images prepare ubuntu-24.04-arm64
+```
+
+Windows ARM64 media is obtained manually and imported against the checksum-pinned manifest:
+
+```bash
 rangeforge images import ~/Downloads/Win11_25H2_English_Arm64_v2.iso \
   --image windows-11-arm64
+rangeforge images verify windows-11-arm64
 rangeforge images prepare windows-11-arm64 --backend utm \
   --template-name rf-base-windows-11-arm64
 ```
 
-Local imports use the same mandatory checksum. A mismatch fails before the artifact is
-cached. Source status and template status remain independent.
+RangeForge does not redistribute Windows media, bypass licensing or activation, or automate
+interactive Windows installation. The operator must prepare a clean base explicitly.
 
-### Base templates
+UTM templates use stable names such as `rf-base-windows-11-arm64`. Manual Vagrant images
+require an explicitly named existing local box. Template metadata binds the image ID,
+verified source checksum, backend, architecture, schema version, and deterministic
+fingerprint.
 
-RangeForge tracks deterministic template metadata containing the image ID, source
-checksum, backend, architecture, schema version, creator version, and fingerprint.
-Templates use stable names such as `rf-base-ubuntu-24.04-arm64`; scenarios use identities
-such as `rf-1337`.
+## Runtime metadata and ownership
 
-UTM's CLI can clone and control a prepared VM but cannot safely configure a management-
-ready Ubuntu cloud image from scratch. Therefore `images prepare` registers an existing,
-clean UTM base VM with the stable name (or `--template-name`) after verifying the source.
-It never claims an OS installation succeeded. The base must contain QEMU Guest Agent
-support for `utmctl ip-address` and Phase 3 guest command/file transport.
+Scenario runtime state is stored beside `scenario.yaml` under `runtime/`. The metadata
+records the deterministic scenario identity, backend, VM name, template reference,
+architecture, management state, provisioning state, and validation state.
 
-For Vagrant, the trusted manifest maps Ubuntu AMD64 to a configured box reference.
-RangeForge records metadata while Vagrant retains ownership of its box cache. Manual
-Vagrant images such as Windows AMD64 require an explicitly named existing local box;
-the registered template fingerprint remains bound to the verified source checksum.
+Destructive operations validate the scenario identity and RangeForge ownership token before
+deleting anything. They preserve:
 
-### Scenario VM lifecycle
+- `scenario.yaml`
+- source artifacts
+- reusable base templates
+- shared CVE artifacts
 
-```bash
-rangeforge runtime plan output/scenario-1337/scenario.yaml
-rangeforge build output/scenario-1337/scenario.yaml
-rangeforge up output/scenario-1337/scenario.yaml
-rangeforge provision output/scenario-1337/scenario.yaml
-rangeforge validate output/scenario-1337/scenario.yaml
-rangeforge status output/scenario-1337/scenario.yaml
-rangeforge destroy output/scenario-1337/scenario.yaml
-```
+Management credentials are infrastructure secrets. They are never valid student attack-path
+credentials and must not appear in generated graphs or student artifacts.
 
-`build` validates the scenario and plan, then clones the shared UTM template or creates a
-scenario-specific Vagrant environment. It does not start the VM. `up` starts it, waits
-for the backend's running state, and asks the backend management integration for an IP.
-UTM uses QEMU Guest Agent-backed `utmctl ip-address`; Vagrant uses `ssh-config`. No address
-is guessed from host network tables.
+## Runtime primitives
 
-A prepared Linux template may use a dedicated `rangeforge` management account and SSH,
-but those credentials are infrastructure-only metadata and must never be exposed as a
-student account or incorporated into the generated attack graph.
+A runtime primitive consists of:
 
-Runtime ownership is recorded at `runtime/runtime.yaml` beside `scenario.yaml`. Destroy
-validates the deterministic VM name and ownership token before deletion, removes only
-scenario runtime state, and preserves `scenario.yaml`, downloads, and shared templates.
-Repeated build/up/destroy operations return stable already-present/already-absent results.
+- typed metadata
+- instructor knowledge
+- a provisioner
+- a runtime validator
+- positive and negative tests
 
-Once a verified source and registered template are present, the complete build, up,
-provision, validate, status, and destroy workflow needs no internet connectivity.
+The current Linux runtime chain includes service enumeration, a purpose-built local foothold,
+credential discovery, and restricted privilege-escalation conditions. Vulnerable conditions,
+student users, and flags are created only inside owned scenario clones.
+
+Provisioning is idempotent and records `NOT_PROVISIONED`, `PROVISIONING`, `COMPLETE`, or
+`FAILED`. A partial failure records the active and completed primitives and can never be
+reported as valid.
 
 ## Curated CVE registry and artifacts
 
-RangeForge never searches the internet for vulnerabilities or exploit code. Every supported
-CVE is a local definition bundle under `rangeforge/cve/definitions/` containing typed
-metadata, a logical primitive, instructor knowledge, a provisioner, a validator, and declared
-artifact requirements. `registry.yaml` versions the curated set. Loading is default-deny:
-unknown CVEs, profile-disallowed techniques, missing scripts, unknown artifacts, architecture
-mismatches, and inconsistent graph transitions are rejected.
+The current curated CVE definition is Apache ActiveMQ Classic 5.18.2 affected by
+`CVE-2023-46604`. It uses a pinned official Apache archive and Eclipse Temurin JRE selected
+for the guest architecture. The service is installed as an unprivileged scenario-specific
+identity only inside an owned clone.
 
-Compatibility is evaluated before seeded selection. A CVE must match the selected training
-profile, platform, runtime, backend, guest architecture, and base guest family/distribution/
-version. CVSS is not used as training difficulty; the primitive's deterministic enumeration,
-exploitation, and dependency scores remain the curriculum input. The graph stores only the
-declared state transition, never payloads or exploit instructions.
-
-The artifact registry pins the exact upstream URL, filename, product/JRE version, SHA-256,
-architecture, license, and redistribution policy. Downloads are allowed only from those HTTPS
-URLs, stream to a `.partial` file, and become ready only after checksum verification and an
-atomic rename. Valid cached files are reused; invalid cached files require the explicit
-`--replace-invalid` option. Shared artifacts survive scenario destruction. Once all required
-artifacts and the base template are ready, provisioning and validation are offline.
-
-Available administrative commands are:
+Administrative commands:
 
 ```bash
 rangeforge cve list
@@ -362,127 +341,32 @@ rangeforge artifacts pull apache-activemq-5.18.2
 rangeforge artifacts verify apache-activemq-5.18.2
 ```
 
-The only current CVE definition is Apache ActiveMQ Classic 5.18.2 / CVE-2023-46604.
-It uses the official Apache archive and a pinned Eclipse Temurin JRE 17.0.19+10 selected for
-ARM64 or AMD64. The service is configured only inside an owned scenario clone, runs as the
-deterministic unprivileged scenario service account, and exposes OpenWire on port 61616.
-RangeForge does not download or execute a public proof of concept.
+Artifact downloads are limited to configured HTTPS URLs, stream through a partial file, and
+become ready only after checksum verification and atomic replacement. Invalid cached files
+require explicit replacement. Shared artifacts survive scenario destruction.
 
-Seed 85 selects the CVE-backed easy path deterministically for ARM64 VM generation:
+The scenario runtime lock records the runtime/backend selection, architecture, base-image
+fingerprint, primitive versions, CVE/service version, and exact artifact identities and
+checksums. It is deterministic for fixed inputs.
 
-```text
-NO_ACCESS
-  ↓ service_enumeration
-SERVICE_DISCOVERED
-  ↓ cve_2023_46604_activemq_rce
-LOW_PRIV_SHELL
-  ↓ credential_discovery_config
-USER_SHELL
-  ↓ linux_sudo_misconfiguration
-ROOT
-```
+## Validation and audience separation
 
-```bash
-rangeforge generate --profile oscp --mode standalone --platform linux \
-  --difficulty easy --seed 85 --runtime vm --architecture arm64
-rangeforge runtime plan output/scenario-85/scenario.yaml
-rangeforge build output/scenario-85/scenario.yaml
-rangeforge up output/scenario-85/scenario.yaml
-rangeforge provision output/scenario-85/scenario.yaml
-rangeforge validate output/scenario-85/scenario.yaml
-rangeforge status output/scenario-85/scenario.yaml
-rangeforge destroy output/scenario-85/scenario.yaml
-```
+Static validation checks profile policy, graph continuity, path length, objective
+reachability, and declared compatibility. Runtime validation separately checks deployed
+service state, identity, permissions, authentication expectations, flags, and intended state
+transitions.
 
-`runtime/lock.yaml` records the schema, seed, profile, runtime/backend, architecture, CVE
-registry version, base-image fingerprint, ordered primitive versions, exact CVE/service
-version, artifact IDs, filenames, versions, architectures, and checksums. It is deterministic
-for fixed inputs. Student artifacts omit the CVE ID, product/version, primitive names,
-credentials, flags, management data, and lock content; instructor runtime files remain mode
-`0600`.
+Negative validators reject unsafe shortcuts including root service identities,
+world-readable proof files, passwordless sudo-all, unrelated-user sudo access, and solution
+leakage. Successful provisioning alone is never sufficient for validity.
 
-CVE validation is layered. It checks the installation layout, exact service version,
-actual base guest release, configuration, service/listener state, affected-version
-prerequisites, non-root identity, authentication expectation, and artifact lock before
-accepting the logical transition. Provisioning also refuses a guest whose actual release does
-not match the curated base constraint.
-Starting a service alone is never sufficient for validity.
+Student artifacts contain only the target and objectives. They exclude attack graphs,
+primitive names, credentials, weaknesses, management secrets, flags, CVE details, and runtime
+lock content. Instructor runtime files are stored separately with restrictive permissions.
 
-## Runtime primitives and vulnerable lab lifecycle
+## Testing
 
-A logical primitive remains graph data: it declares required and provided access states.
-A runtime primitive adds a separate manifest, generic knowledge, provisioner, and validator
-under `rangeforge/runtime_primitives/definitions/`. Provisioners never select paths and the
-graph never contains guest commands. `build` rejects a graph before cloning when a selected
-primitive lacks an exact platform, architecture, runtime, and backend implementation; it
-never substitutes another technique.
-
-The first complete runtime chain is:
-
-```text
-NO_ACCESS
-  ↓ service_enumeration
-SERVICE_DISCOVERED
-  ↓ simple_web_foothold
-LOW_PRIV_SHELL
-  ↓ credential_discovery_config
-USER_SHELL
-  ↓ linux_sudo_misconfiguration
-ROOT
-```
-
-The foothold is a purpose-built RangeForge diagnostics application for authorized local
-labs, not a public CVE or third-party vulnerable package. It runs as an unprivileged
-service identity. The configuration primitive creates a deterministic local user and a
-credential artifact readable only from the service context. The sudo primitive grants
-that user one deliberately unsafe `/usr/bin/find` rule, never passwordless sudo-all.
-
-Seed 81 currently selects this easy chain deterministically:
-
-```bash
-rangeforge generate --profile oscp --mode standalone --platform linux \
-  --difficulty easy --seed 81
-rangeforge build output/scenario-81/scenario.yaml
-rangeforge up output/scenario-81/scenario.yaml
-rangeforge provision output/scenario-81/scenario.yaml
-rangeforge validate output/scenario-81/scenario.yaml
-rangeforge status output/scenario-81/scenario.yaml
-rangeforge destroy output/scenario-81/scenario.yaml
-```
-
-`provision` revalidates static policy, ensures the owned VM is running, persists the
-scenario-ordered plan, applies idempotent primitive scripts, and runs runtime validation.
-State is recorded as `NOT_PROVISIONED`, `PROVISIONING`, `COMPLETE`, or `FAILED`. A partial
-failure records the active and completed primitives and cannot be reported as valid.
-
-UTM guest commands use QEMU Guest Agent execution against the owned VM name. Vagrant uses
-its scenario-specific SSH configuration. There is no command that accepts an arbitrary
-provisioning IP. Runtime ownership, VM identity, architecture, running state, management
-readiness, and template separation are checked before scripts execute.
-
-### Deterministic identities and flags
-
-Scenario usernames, credentials, service ports, `local.txt`, and `/root/proof.txt` use
-domain-separated SHA-256 derivation over the seed, scenario/profile identity, generator
-version, and Phase 3 schema. They are stable for the same inputs and normally change with
-the seed. `local.txt` is readable from the service context; `proof.txt` is root-owned mode
-`0600`. Values are stored in mode-`0600` instructor metadata and never printed in normal
-student output.
-
-### Runtime validation and audience separation
-
-Each primitive checks deployed service state, identity, permissions, authentication, and
-the intended transition through the trusted management channel. Global checks verify both
-flags and reject obvious shortcuts: root service/user identities, world-readable proof,
-solution leakage, passwordless sudo-all, and sudo access for unrelated users. Results are
-persisted at `runtime/validation.json`; provisioning success by itself is not validity.
-
-`student/README.md` and `student/targets.txt` contain only the current target IP and the
-two objectives. `runtime/instructor.json` contains the deterministic lab configuration and
-is not student-facing. Attack graphs, primitive names, credentials, weaknesses,
-management secrets, and flag values are excluded from student artifacts.
-
-Run the quality checks with:
+The default suite excludes tests that require real VM lifecycle access:
 
 ```bash
 pytest
@@ -490,27 +374,31 @@ ruff check .
 mypy rangeforge
 ```
 
-## Current limitations and roadmap
+Runtime-marked tests must be enabled explicitly in an authorized local environment. Ordinary
+CI and development tests remain deterministic, offline, and side-effect free.
 
-RangeForge does not automate interactive UTM guest installation, Windows installation, or
-cloud-init seed creation; clean base templates must be prepared explicitly and registered.
-The current stable Ubuntu UTM template passed the real ARM64 CVE lifecycle. Windows 11 ARM64
-image compatibility and manual source/template readiness are supported, but Windows guest
-management and provisioning remain Phase 5.3 work. AMD64/Vagrant Windows behavior has
-offline coverage only and has not been executed on a real x86 host. UTM guest-agent file
-transfer is reliable but slow for the two approximately 45 MB cached archives.
+## Current limitations
 
-Phase 3 temporarily uses the backend-discovered VM network for the student target; a dedicated
-student/attack network remains future work. Docker CVE deployment, Windows attack graphs and
-management transport, Active Directory, cloud ranges, arbitrary targets, dynamic CVE/PoC
-discovery, and AI-driven validity decisions remain out of scope.
+- Production scenario generation is Linux-only.
+- Windows management transport, provisioning, attack graphs, Active Directory, and Windows
+  Server are not implemented.
+- Windows AMD64 has deterministic schema and lifecycle coverage but has not been validated on
+  a real x86 host.
+- Interactive UTM and Windows installation are operator-managed.
+- Current vulnerable runtime primitives are VM-backed; Docker content remains limited.
+- The student target currently uses the backend-discovered VM network; a dedicated isolated
+  student network remains future work.
+- Cloud ranges, arbitrary targets, internet scanning, dynamic CVE discovery, public PoC
+  downloads, malware, persistence, and evasion are outside project scope.
 
 ## Security and authorization
 
-RangeForge is intended only for systems you own or have explicit permission to test,
-inside controlled and isolated training environments. It intentionally creates a vulnerable
-local scenario clone only after RangeForge ownership checks. Source images and shared base
-templates remain clean. RangeForge has no arbitrary-target input or discovery, internet
-scanning, remote-system provisioning, real credential attacks, malware, persistence, evasion,
-or dynamic public-exploit downloading. CVE metadata, compatibility, and runtime validity come
-from reviewed registry data and deterministic validators, never from AI output.
+Use RangeForge only in isolated environments you own or are explicitly authorized to test.
+Source images and reusable base templates must remain clean and non-vulnerable. Provisioners
+target only RangeForge-owned scenario clones after identity, architecture, runtime, backend,
+template, and ownership checks succeed.
+
+RangeForge has no arbitrary-target input, network discovery, remote-system provisioning,
+real-world credential attacks, malware, persistence, evasion, or dynamic exploit downloading.
+Scenario validity and compatibility come from deterministic code and reviewed local registry
+data, never from AI output.
