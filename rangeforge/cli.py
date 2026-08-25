@@ -339,14 +339,16 @@ def images_list(
     except (ConfigError, ImageRegistryError, OSError) as exc:
         console.print(f"[red]Image listing failed: {exc}[/red]")
         raise typer.Exit(code=1) from exc
-    table = Table("Image", "Guest", "Architecture", "Runtime", "Source")
+    table = Table("Image", "Architecture", "Runtime/Backend", "Acquisition", "Source")
     for inspection in inspections:
         manifest = inspection.manifest
         table.add_row(
             manifest.id,
-            f"{manifest.os.distribution} {manifest.os.version}",
             manifest.architecture.value,
-            ", ".join(item.value for item in manifest.runtimes),
+            ", ".join(
+                item.value for item in (*manifest.runtimes, *manifest.backends)
+            ),
+            manifest.acquisition_method.value.upper(),
             inspection.artifact_state.value.upper(),
         )
     console.print(table)
@@ -373,6 +375,8 @@ def images_info(
     table.add_row("Runtime", ", ".join(item.value for item in manifest.runtimes))
     table.add_row("Backends", ", ".join(item.value for item in manifest.backends))
     table.add_row("Vendor", manifest.source.vendor)
+    table.add_row("Acquisition", manifest.acquisition_method.value.upper())
+    table.add_row("SHA-256", manifest.checksum.value or "not configured")
     table.add_row("Source artifact", inspection.artifact_state.value.upper())
     for backend, state in inspection.template_states.items():
         table.add_row(f"{backend.value.upper()} template", state.value.upper())
@@ -704,6 +708,7 @@ def _render_runtime_plan(plan: RuntimePlan) -> None:
         table.add_row("Guest architecture", plan.guest.architecture.value)
         table.add_row("Image", plan.guest.image_id or "unresolved")
     if plan.image_status:
+        table.add_row("Acquisition", plan.image_status.acquisition.upper())
         table.add_row("Source status", plan.image_status.source.upper())
         table.add_row("Template status", plan.image_status.template.upper())
     for cve in plan.cve_status:

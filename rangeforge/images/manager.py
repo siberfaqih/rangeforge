@@ -13,6 +13,7 @@ from rangeforge.images.cache import ImageCache
 from rangeforge.images.downloader import HTTPSImageDownloader, ImageDownloader, ProgressCallback
 from rangeforge.images.models import (
     ArtifactState,
+    ImageAcquisitionMethod,
     ImageInspection,
     ImageManifest,
     PullResult,
@@ -140,6 +141,19 @@ class ImageManager:
         state_callback: Callable[[ArtifactState], None] | None = None,
     ) -> PullResult:
         manifest = self.registry.require(image_id)
+        acquisition = manifest.source.acquisition
+        if acquisition is ImageAcquisitionMethod.MANUAL:
+            raise ImageManagerError(
+                f"Image '{image_id}' uses manual media acquisition and is never "
+                "downloaded. Obtain the trusted source image yourself, verify its "
+                "reviewed SHA-256, then run: rangeforge images import <path> "
+                f"--image {image_id}"
+            )
+        if acquisition is ImageAcquisitionMethod.BACKEND_MANAGED:
+            raise ImageManagerError(
+                f"Image '{image_id}' is acquired through its declared VM backend, "
+                "not the RangeForge downloader. Prepare it with the backend."
+            )
         if manifest.source.url is None:
             raise ImageManagerError(
                 f"Image '{image_id}' has no trusted download URL configured."

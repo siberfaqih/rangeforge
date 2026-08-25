@@ -7,15 +7,21 @@ from typing import Literal
 
 from rangeforge.artifacts.manager import ArtifactManager
 from rangeforge.cve.registry import CVERegistry
-from rangeforge.host.models import HostInfo
+from rangeforge.host.models import Architecture, HostInfo
 from rangeforge.images.manager import ImageManager
-from rangeforge.images.models import ArtifactState, TemplateState
+from rangeforge.images.models import (
+    ArtifactState,
+    ImageAcquisitionMethod,
+    ImageManifest,
+    TemplateState,
+)
 from rangeforge.images.resolver import ImageResolutionError, ImageResolver
 from rangeforge.models import Primitive, Scenario, TrainingProfile
 from rangeforge.primitives.registry import PrimitiveRegistry
 from rangeforge.runtime.backends.docker import DockerBackend
 from rangeforge.runtime.backends.utm import UTMBackend
 from rangeforge.runtime.backends.vagrant import VagrantBackend
+from rangeforge.runtime.guest import check_guest_compatibility
 from rangeforge.runtime.models import (
     BackendStatus,
     CVEArtifactPlanStatus,
@@ -61,15 +67,17 @@ class RuntimePlanner:
     ) -> RuntimePlan:
         issues: list[str] = []
         primitives = self._scenario_primitives(scenario, issues)
-        resolution = RuntimeResolver().resolve(requested_runtime, host, primitives)
+        guest_architecture = Architecture(scenario.scenario.guest_architecture)
+        resolution = RuntimeResolver().resolve(
+            requested_runtime,
+            host,
+            primitives,
+            guest_architecture=guest_architecture,
+        )
         issues.extend(resolution.errors)
         if resolution.runtime.value != scenario.scenario.target_runtime:
             issues.append(
                 "Requested runtime does not match the scenario generation target."
-            )
-        if resolution.guest_architecture.value != scenario.scenario.guest_architecture:
-            issues.append(
-                "Resolved guest architecture does not match the scenario generation target."
             )
         backend_status = self.backend_status_provider(resolution, host)
 
@@ -83,14 +91,25 @@ class RuntimePlanner:
                 scenario, host, resolution, backend_status, issues
             )
 
+        guest_compatibility = check_guest_compatibility(
+            platform=scenario.scenario.platform,
+            family=requirement.family,
+            runtime=resolution.runtime,
+            backend=resolution.backend,
+            architecture=guest_architecture,
+            host=host,
+        )
+        issues.extend(guest_compatibility.errors)
+
         guest = GuestPlan(
             family=requirement.family,
             distribution=requirement.distribution,
             version=requirement.version,
-            architecture=resolution.guest_architecture,
+            architecture=guest_architecture,
         )
         image_status: ImagePlanStatus | None = None
-        if resolution.compatible:
+        resolved_manifest: ImageManifest | None = None
+        if resolution.compatible and guest_compatibility.compatible:
             try:
                 manifest = self.image_resolver.resolve(
                     family=guest.family,
@@ -100,10 +119,12 @@ class RuntimePlanner:
                     runtime=resolution.runtime,
                     backend=resolution.backend,
                 )
+                resolved_manifest = manifest
                 guest = guest.model_copy(update={"image_id": manifest.id})
                 inspection = self.image_manager.inspect(manifest.id)
                 template = self._template_state(inspection.template_states, resolution)
                 image_status = ImagePlanStatus(
+                    acquisition=manifest.acquisition_method.value,
                     source=inspection.artifact_state.value,
                     template=template.value if template else "not_required",
                 )
@@ -117,7 +138,11 @@ class RuntimePlanner:
             issues,
         )
 
-        compatible = resolution.compatible and not issues
+        compatible = (
+            resolution.compatible
+            and guest_compatibility.compatible
+            and not issues
+        )
         backend_ready = backend_status is not None and backend_status.available
         source_ready = image_status is not None and image_status.source == ArtifactState.READY
         template_ready = (
@@ -156,6 +181,7 @@ class RuntimePlanner:
                 image_status,
                 issues,
                 cve_status,
+                manifest=resolved_manifest,
             ),
         )
 
@@ -266,15 +292,41 @@ class RuntimePlanner:
         image_status: ImagePlanStatus | None,
         issues: list[str],
         cve_status: tuple[CVEPlanStatus, ...],
+        manifest: ImageManifest | None = None,
     ) -> str:
         if issues:
             return "Resolve compatibility errors before deployment."
         if backend_status is None or not backend_status.available:
             backend = resolution.backend.value if resolution.backend else resolution.runtime.value
             return f"Install or start the required {backend} backend."
+        # Acquisition-aware guidance: manual media must be imported by the
+        # operator, backend-managed sources are prepared through their VM
+        # backend, and checksum-pending images can never become ready until
+        # a reviewed SHA-256 is configured in the registry.
+        acquisition = manifest.source.acquisition if manifest else None
+        checksum_pending = manifest is not None and manifest.checksum.value is None
         if image_status is None or image_status.source == ArtifactState.MISSING:
+            if checksum_pending:
+                return (
+                    "This image has no reviewed SHA-256; configure a reviewed "
+                    "checksum before its source media can become ready."
+                )
+            if acquisition is ImageAcquisitionMethod.MANUAL:
+                return "Import the trusted, checksum-verifiable source image."
+            if acquisition is ImageAcquisitionMethod.BACKEND_MANAGED:
+                backend = (
+                    resolution.backend.value if resolution.backend else "declared"
+                )
+                return f"Prepare the source image through the {backend} backend."
             return "Pull or import the trusted, checksum-verifiable source image."
         if image_status.source != ArtifactState.READY:
+            if checksum_pending:
+                return (
+                    "This image has no reviewed SHA-256; configure a reviewed "
+                    "checksum before its source media can become ready."
+                )
+            if acquisition is ImageAcquisitionMethod.MANUAL:
+                return "Import the trusted, checksum-verifiable source image."
             return "Verify the source image before preparing a backend template."
         if (
             resolution.runtime is RuntimeType.VM

@@ -72,7 +72,13 @@ class ImageCache:
             return TemplateState.MISSING
         if template.status is not TemplateState.READY:
             return template.status
-        if current_checksum and template.source_checksum.lower() != current_checksum.lower():
+        # A READY template whose freshness cannot be checked against a
+        # configured source checksum must never display as READY; this keeps
+        # inspection fail-closed for checksum-pending images.
+        if (
+            current_checksum is None
+            or template.source_checksum.lower() != current_checksum.lower()
+        ):
             return TemplateState.STALE
         from rangeforge.images.templates import template_fingerprint
 

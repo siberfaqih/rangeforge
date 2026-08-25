@@ -11,10 +11,12 @@ from rangeforge.images.manager import ImageManager
 from rangeforge.images.models import (
     ArtifactFormat,
     Checksum,
+    ImageAcquisitionMethod,
     ImageManifest,
     ImageOS,
     ImageSource,
     ImageSourceType,
+    VagrantBox,
 )
 from rangeforge.images.registry import ImageRegistry
 from rangeforge.images.resolver import ImageResolver
@@ -32,6 +34,8 @@ from rangeforge.runtime.metadata import (
 from rangeforge.runtime.models import (
     BackendStatus,
     BackendType,
+    GuestPlan,
+    ImagePlanStatus,
     RuntimePlan,
     RuntimeResolution,
     RuntimeType,
@@ -78,6 +82,27 @@ class FakeUTM:
 
     def ip_addresses(self, name: str) -> tuple[str, ...]:
         return ("192.168.64.50",) if self.vms.get(name) is VMState.RUNNING else ()
+
+
+class FakeVagrant:
+    def __init__(self, references: set[str]) -> None:
+        self.references = references
+        self.prepared_boxes: list[VagrantBox] = []
+
+    def available(self) -> bool:
+        return True
+
+    def template_exists(self, reference: str) -> bool:
+        return reference in self.references
+
+    def prepare_environment(
+        self, directory: Path, box: VagrantBox, vm_name: str = "rangeforge"
+    ) -> Path:
+        self.prepared_boxes.append(box)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "Vagrantfile"
+        path.write_text(f"# {vm_name}: {box.name}\n", encoding="utf-8")
+        return path
 
 
 def _host() -> HostInfo:
@@ -306,3 +331,89 @@ def test_destroy_rejects_tampered_ownership_metadata(
     assert manager.cache.artifact_path(
         manager.registry.require("ubuntu-24.04-arm64")
     ).is_file()
+
+
+def test_manual_vagrant_template_reference_builds_scenario_environment(
+    scenario: Scenario,
+    tmp_path: Path,
+) -> None:
+    content = b"reviewed windows amd64 media"
+    manifest = ImageManifest(
+        id="windows-11-amd64",
+        os=ImageOS(family="windows", distribution="windows", version="11"),
+        architecture=Architecture.AMD64,
+        runtimes=(RuntimeType.VM,),
+        backends=(VMBackend.VAGRANT,),
+        source=ImageSource(
+            type=ImageSourceType.OFFICIAL,
+            vendor="microsoft",
+            artifact_format=ArtifactFormat.ISO,
+            version="test",
+            filename="windows-11-amd64.iso",
+            acquisition=ImageAcquisitionMethod.MANUAL,
+        ),
+        checksum=Checksum(value=hashlib.sha256(content).hexdigest()),
+    )
+    cache = ImageCache(tmp_path / "images")
+    cache.ensure()
+    cache.artifact_path(manifest).write_bytes(content)
+    manager = ImageManager(ImageRegistry((manifest,)), cache)
+    templates = TemplateManager(manager)
+    reference = "rf-base-windows-11-amd64"
+    vagrant = FakeVagrant({reference})
+    templates.prepare(
+        manifest.id,
+        VMBackend.VAGRANT,
+        vagrant,
+        reference=reference,
+    )
+
+    host = HostInfo(os=HostOS.LINUX, architecture=Architecture.AMD64, apple_silicon=False)
+    plan = RuntimePlan(
+        scenario_id=scenario.scenario.id,
+        host=host,
+        runtime=RuntimeResolution(
+            runtime=RuntimeType.VM,
+            backend=VMBackend.VAGRANT,
+            guest_architecture=Architecture.AMD64,
+            compatible=True,
+            reason="AMD64 VM hosts use Vagrant.",
+        ),
+        backend_status=BackendStatus(backend=BackendType.VAGRANT, available=True),
+        guest=GuestPlan(
+            family="windows",
+            distribution="windows",
+            version="11",
+            architecture=Architecture.AMD64,
+            image_id=manifest.id,
+        ),
+        image_status=ImagePlanStatus(
+            acquisition="manual", source="ready", template="ready"
+        ),
+        compatible=True,
+        deployable=True,
+        next_action="Runtime prerequisites are ready for the scenario lifecycle.",
+    )
+    windows_scenario = scenario.model_copy(
+        update={
+            "scenario": scenario.scenario.model_copy(
+                update={"platform": "windows", "guest_architecture": "amd64"}
+            )
+        }
+    )
+    scenario_path = ScenarioYamlSerializer().dump(
+        windows_scenario, tmp_path / "scenarios"
+    )
+    lifecycle = ScenarioLifecycle(
+        template_manager=templates,
+        host=host,
+        utm=FakeUTM("unused"),  # type: ignore[arg-type]
+        vagrant=vagrant,  # type: ignore[arg-type]
+        sleeper=lambda _: None,
+    )
+
+    result = lifecycle.build(windows_scenario, scenario_path, plan)
+    assert result.changed
+    assert vagrant.prepared_boxes == [VagrantBox(name=reference)]
+    assert result.metadata is not None
+    assert result.metadata.template.name == reference
