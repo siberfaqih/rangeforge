@@ -7,6 +7,20 @@ scenario definition.
 
 ## Current status
 
+Phase 5.2 is complete. Windows 11 is represented through the existing generic guest,
+image, runtime-planning, and backend lifecycle rather than a parallel Windows subsystem.
+On Apple Silicon, `windows-11-arm64` resolves natively to UTM with manual, checksum-pinned
+Microsoft installation media. Its source artifact and reusable
+`rf-base-windows-11-arm64` template have been verified `READY`, and repeated local plans
+are deterministic, compatible, and deployable. `windows-11-amd64` resolves only to
+Vagrant on supported AMD64 hosts and remains fail-closed until reviewed media and an
+explicit clean local box are registered.
+
+Production generation remains Linux-only and default-deny for Windows. Phase 5.2 does
+not add Windows attack graphs, installation automation, guest credentials, provisioning,
+or management transport; those concerns remain separate, with management transport
+reserved for Phase 5.3.
+
 Phase 4 adds a versioned, default-deny CVE registry and a trusted artifact lifecycle on top
 of Phase 3's scenario-scoped runtime primitive engine. The first curated definition models
 Apache ActiveMQ Classic 5.18.2 affected by CVE-2023-46604 on ARM64/UTM and AMD64/Vagrant.
