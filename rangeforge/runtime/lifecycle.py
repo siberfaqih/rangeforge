@@ -58,6 +58,36 @@ def _guest_platform_from_family(family: str) -> GuestPlatform:
     raise LifecycleError(f"Unknown guest family: {family!r}.")
 
 
+def _scenario_platform(scenario: Scenario) -> GuestPlatform | None:
+    """Resolve the scenario's requested platform; ``None`` when unknown."""
+    normalized = scenario.scenario.platform.strip().lower()
+    for platform in GuestPlatform:
+        if platform.value == normalized:
+            return platform
+    return None
+
+
+def _reject_cross_platform_metadata(metadata: RuntimeMetadata, platform: GuestPlatform) -> None:
+    """Fail closed when persisted metadata disagrees with the guest platform.
+
+    Metadata written before platform-aware builds carries no platform and is
+    only ever treated as Linux. Silently treating such a record as Linux would
+    bypass the fixed Windows readiness probe entirely — a running Windows
+    clone could be marked READY from backend IP discovery alone — so a
+    disagreeing persisted record must be cleared explicitly.
+    """
+    persisted = effective_guest_platform(metadata)
+    if persisted is platform:
+        return
+    raise LifecycleError(
+        "Persisted runtime metadata describes guest platform "
+        f"'{persisted.value}', which does not match the scenario guest "
+        f"platform '{platform.value}'. Metadata written by earlier versions "
+        "cannot be reconciled for this platform; run destroy to clear stale "
+        "metadata before rebuilding."
+    )
+
+
 class ScenarioLifecycle:
     def __init__(
         self,
@@ -103,6 +133,7 @@ class ScenarioLifecycle:
         existing = store.load()
         if existing:
             store.validate_ownership(scenario, existing)
+            _reject_cross_platform_metadata(existing, platform)
             if self._resource_exists(existing, store):
                 return LifecycleResult(
                     changed=False,
@@ -178,13 +209,32 @@ class ScenarioLifecycle:
         metadata = built.metadata
         assert metadata is not None
         store = RuntimeMetadataStore(scenario_path)
+        windows_guest = effective_guest_platform(metadata) is GuestPlatform.WINDOWS
         state = self._state(metadata, store)
+        wedged_ready_probe: tuple[str, ...] | None = None
         if state is VMState.RUNNING and metadata.guest.management is ManagementState.READY:
-            return LifecycleResult(
-                changed=False,
-                message="Scenario VM is already running and management is ready.",
-                metadata=metadata,
+            if not windows_guest:
+                return LifecycleResult(
+                    changed=False,
+                    message="Scenario VM is already running and management is ready.",
+                    metadata=metadata,
+                )
+            # A previously READY Windows channel may have wedged since the
+            # last probe (the exact failure mode the transport defends
+            # against). Readiness is re-verified here, never assumed; if the
+            # re-probe fails, control falls through so the persisted state
+            # converges to RUNNING + UNAVAILABLE below.
+            self.sleeper(_WINDOWS_MANAGEMENT_SETTLE_SECONDS)
+            ready_now, failed_checks = self._verify_windows_management(
+                scenario, scenario_path
             )
+            if ready_now:
+                return LifecycleResult(
+                    changed=False,
+                    message="Scenario VM is already running and management is ready.",
+                    metadata=metadata,
+                )
+            wedged_ready_probe = failed_checks or ("management_probe_failed",)
 
         starting = metadata.model_copy(
             update={
@@ -221,8 +271,10 @@ class ScenarioLifecycle:
             addresses = self._ip_addresses(metadata, store)
         # IP discovery alone never proves Windows management readiness; an
         # owned running Windows clone must pass the fixed internal probe.
-        failed_checks: tuple[str, ...] = ()
-        if effective_guest_platform(metadata) is GuestPlatform.WINDOWS:
+        if wedged_ready_probe is not None:
+            # The stale-READY re-probe already ran above and failed.
+            ready, failed_checks = False, wedged_ready_probe
+        elif windows_guest:
             # UTM can report a QGA-backed IP before the Windows guest agent's
             # file and exec RPC channels are stable. Starting PowerShell in
             # that interval can wedge command RPC until the guest restarts.
@@ -232,6 +284,7 @@ class ScenarioLifecycle:
             ready, failed_checks = self._verify_windows_management(scenario, scenario_path)
         else:
             ready = bool(addresses)
+            failed_checks = ()
         running = starting.model_copy(
             update={
                 "vm": starting.vm.model_copy(update={"state": VMState.RUNNING}),
@@ -267,16 +320,35 @@ class ScenarioLifecycle:
         if metadata is None:
             return LifecycleResult(changed=False, message="Scenario VM is not built.")
         store.validate_ownership(scenario, metadata)
+        scenario_platform = _scenario_platform(scenario)
+        if scenario_platform is not None:
+            _reject_cross_platform_metadata(metadata, scenario_platform)
         state = self._state(metadata, store)
         addresses = self._ip_addresses(metadata, store) if state is VMState.RUNNING else ()
+        failed_checks: tuple[str, ...] = ()
         if effective_guest_platform(metadata) is GuestPlatform.WINDOWS:
-            # Windows management readiness comes only from the internal probe;
-            # backend IP discovery alone never marks it READY, and a VM that
-            # is no longer running can never retain READY.
-            if state is VMState.RUNNING:
-                management = metadata.guest.management
+            # Windows management readiness comes only from the internal probe.
+            # A persisted READY is re-probed while the clone is running; a
+            # channel that wedged after its previous successful probe must be
+            # downgraded instead of reporting READY indefinitely.
+            if (
+                state is VMState.RUNNING
+                and metadata.guest.management is ManagementState.READY
+            ):
+                ready, failed_checks = self._verify_windows_management(
+                    scenario, scenario_path
+                )
+                management = (
+                    ManagementState.READY
+                    if ready
+                    else ManagementState.UNAVAILABLE
+                )
             else:
-                management = ManagementState.NOT_READY
+                management = (
+                    metadata.guest.management
+                    if state is VMState.RUNNING
+                    else ManagementState.NOT_READY
+                )
         else:
             management = (
                 ManagementState.READY if addresses else ManagementState.NOT_READY
@@ -293,7 +365,10 @@ class ScenarioLifecycle:
             }
         )
         store.save(updated)
-        return LifecycleResult(changed=False, message="Runtime status refreshed.", metadata=updated)
+        message = "Runtime status refreshed."
+        if failed_checks:
+            message += " Windows management checks failed: " + ", ".join(failed_checks) + "."
+        return LifecycleResult(changed=False, message=message, metadata=updated)
 
     def destroy(self, scenario: Scenario, scenario_path: Path) -> LifecycleResult:
         store = RuntimeMetadataStore(scenario_path)
@@ -340,9 +415,15 @@ class ScenarioLifecycle:
                 template_manager=self.template_manager,
                 expected_architecture=self.host.architecture,
             )
-        except (ManagementTransportError, ImageManagerError, RuntimeMetadataError):
-            # Persisted-metadata races, tampering, and template-registry
-            # failures must leave management unavailable instead of escaping.
+        except (
+            ManagementTransportError,
+            ImageManagerError,
+            RuntimeMetadataError,
+            OSError,
+        ):
+            # Persisted-metadata races, tampering, template-registry failures,
+            # and probe setup failures (for example a temporary file error)
+            # must leave management unavailable instead of escaping from up().
             return False, ("management_transport_unavailable",)
         failed = tuple(check.name for check in probe.checks if not check.passed)
         return probe.ok, failed

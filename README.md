@@ -20,7 +20,7 @@ logical scenario generation separate from runtime deployment.
 | VM runtime on supported AMD64 hosts | Vagrant |
 | Ubuntu 24.04 ARM64 and AMD64 images | Supported |
 | Windows 11 ARM64 image planning and readiness | Supported with manual media and UTM |
-| Windows 11 AMD64 compatibility planning | Planning only; media is operator-supplied and the lifecycle is unvalidated on a real x86 host |
+| Windows 11 AMD64 compatibility planning | Planning denial; Windows guests are denied on every current host backend at planning time |
 | Windows 11 ARM64 management transport | Supported on owned UTM clones via QEMU Guest Agent and built-in PowerShell; validated on one real owned clone (READY plus the gated runtime smoke), then destroyed with its base preserved |
 | Windows Vagrant management | Unsupported |
 | Windows scenario generation and provisioning | Not enabled |
@@ -186,7 +186,9 @@ clone is running, a fixed internal probe verifies agent execution, the expected 
 major version and the hardware CPU architecture reported by WMI (immune to emulated
 process views), file round-trip, exit-code propagation, marker integrity, and workspace
 cleanup. The whole probe shares one bounded 300-second budget; when it is exhausted, the
-remaining checks fail closed without further guest calls. The probe creates no
+remaining checks fail closed without further guest calls. Both repeated `up` and `status`
+re-probe a running clone whose persisted management state is `READY`, so a later QGA wedge
+cannot leave an indefinitely stale success state. The probe creates no
 vulnerability, student account, flag, credential, or persistent service, and it can never
 target a shared base template. Failure leaves management NOT_READY or UNAVAILABLE.
 
@@ -301,9 +303,10 @@ Windows image identities are exact and architecture-specific:
 | `windows-11-arm64` | ARM64 | UTM | Manual, checksum-pinned media |
 | `windows-11-amd64` | AMD64 | Vagrant | Manual, checksum-pending media |
 
-`windows-11-amd64` remains compatible but non-deployable until a reviewed checksum and an
-existing clean local Vagrant box are registered on a supported AMD64 host. RangeForge never
-converts an AMD64 request into ARM64 or routes UTM through Vagrant.
+`windows-11-amd64` identity resolution is deterministic, but every current AMD64 host
+backend (Vagrant) is denied for Windows guests at planning time because Windows management
+is UTM/QGA-only. RangeForge never converts an AMD64 request into ARM64 or routes UTM
+through Vagrant.
 
 ## Configuration
 
@@ -477,9 +480,9 @@ CI and development tests remain deterministic, offline, and side-effect free.
   validated once against a real owned Windows 11 ARM64 UTM clone (management READY plus
   the gated runtime smoke test, clone destroyed afterwards, base preserved); new hosts
   should repeat that gated smoke test before relying on it.
-- Windows AMD64 has deterministic schema and planning coverage only; its lifecycle has not
-  been validated on a real x86 host and remains non-deployable until reviewed media and a
-  clean local Vagrant base are registered.
+- Windows AMD64 has deterministic schema and planning coverage only; Windows guests are
+  denied on every current host backend (planning-time denial) and the lifecycle has not
+  been validated on a real x86 host.
 - Interactive UTM and Windows installation are operator-managed.
 - Current vulnerable runtime primitives are VM-backed; Docker content remains limited.
 - The student target currently uses the backend-discovered VM network; a dedicated isolated

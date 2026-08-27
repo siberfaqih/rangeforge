@@ -75,6 +75,16 @@ def run_guest_file(command: tuple[str, ...], content: bytes, timeout: float) -> 
 
 
 class GuestTransport(Protocol):
+    """Protocol for guest provisioning transports.
+
+    ``language`` is a required attribute: the primitive engine refuses any
+    transport that does not explicitly declare its execution language
+    (default-deny), so an undeclared transport can never silently execute
+    shell manifests.
+    """
+
+    language: ExecutionLanguage
+
     def execute(self, script: str, *, timeout: float = 120) -> CommandResult: ...
 
     def push(self, source: Path, destination: str, *, timeout: float = 300) -> CommandResult: ...

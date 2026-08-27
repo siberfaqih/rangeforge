@@ -45,6 +45,7 @@ from rangeforge.runtime.metadata import (
 from rangeforge.runtime.models import (
     BackendStatus,
     BackendType,
+    ExecutionLanguage,
     GuestPlan,
     ManagementState,
     RuntimeGuestState,
@@ -205,6 +206,8 @@ class ReadyArtifactManager:
 
 
 class SuccessfulGuest:
+    language = ExecutionLanguage.SHELL
+
     def __init__(self) -> None:
         self.pushed: list[tuple[Path, str]] = []
 

@@ -20,6 +20,7 @@ from rangeforge.runtime.metadata import (
     scenario_vm_name,
 )
 from rangeforge.runtime.models import (
+    ExecutionLanguage,
     GuestPlan,
     ManagementState,
     ProvisioningState,
@@ -55,6 +56,8 @@ RUNTIME_PATH = (
 
 
 class SuccessfulGuest:
+    language = ExecutionLanguage.SHELL
+
     def __init__(self) -> None:
         self.scripts: list[str] = []
 
@@ -396,3 +399,57 @@ def test_utm_guest_transport_preserves_guest_exit_status() -> None:
 
     assert result.returncode == 23
     assert "provisioner failed" in result.stdout
+
+
+class UndeclaredTransport:
+    """A guest transport that does not declare its execution language."""
+
+    def execute(self, script: str, *, timeout: float = 120) -> CommandResult:
+        return CommandResult(returncode=0)
+
+    def push(self, source: Path, destination: str, *, timeout: float = 300) -> CommandResult:
+        return CommandResult(returncode=0)
+
+
+def test_provision_rejects_undeclared_transport_language(
+    scenario: Scenario,
+    profile: TrainingProfile,
+    registry: PrimitiveRegistry,
+    tmp_path: Path,
+) -> None:
+    """A transport that does not declare its language is rejected (default-deny)."""
+    runtime_scenario = _runtime_scenario(scenario, profile, registry)
+    scenario_path = ScenarioYamlSerializer().dump(runtime_scenario, tmp_path)
+    _deployed(runtime_scenario, scenario_path)
+    engine = RuntimePrimitiveEngine(RuntimePrimitiveLoader().load(registry))
+    with pytest.raises(ProvisioningError, match="no declared execution language"):
+        engine.provision(
+            runtime_scenario,
+            scenario_path,
+            _plan(runtime_scenario),
+            UndeclaredTransport(),  # type: ignore[arg-type]
+        )
+
+
+def test_provision_rejects_non_shell_transport_language(
+    scenario: Scenario,
+    profile: TrainingProfile,
+    registry: PrimitiveRegistry,
+    tmp_path: Path,
+) -> None:
+    """A PowerShell transport must never execute shell primitive manifests."""
+    runtime_scenario = _runtime_scenario(scenario, profile, registry)
+    scenario_path = ScenarioYamlSerializer().dump(runtime_scenario, tmp_path)
+    _deployed(runtime_scenario, scenario_path)
+    engine = RuntimePrimitiveEngine(RuntimePrimitiveLoader().load(registry))
+
+    class PowerShellTransport(UndeclaredTransport):
+        language = ExecutionLanguage.POWERSHELL
+
+    with pytest.raises(ProvisioningError, match="Linux shell management transport"):
+        engine.provision(
+            runtime_scenario,
+            scenario_path,
+            _plan(runtime_scenario),
+            PowerShellTransport(),  # type: ignore[arg-type]
+        )

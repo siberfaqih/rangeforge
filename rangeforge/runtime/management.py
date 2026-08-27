@@ -148,7 +148,7 @@ def validate_management_target(
 
     ``template_manager`` is optional only so focused unit tests can exercise
     this low-level gate directly. The public factories
-    (:func:`owned_management_transport` and :func:`owned_guest_transport`)
+    (:func:`probe_windows_management` and :func:`owned_guest_transport`)
     require it, so every production transport construction performs trusted
     template reconciliation.
     """
@@ -460,10 +460,9 @@ class _WindowsPowerShellTransport:
     """Manage an owned Windows ARM64 UTM clone through QGA and PowerShell.
 
     Private by design: instances are handed out only through
-    :func:`owned_management_transport` after full ownership validation, and
+    :func:`_owned_management_transport` after full ownership validation, and
     every guest command is built internally — there is no public API that
     accepts an arbitrary guest command.
-    
 
     The executable and argv are fixed: ``utmctl exec`` invokes the absolute
     built-in Windows PowerShell interpreter with ``-NoLogo -NoProfile
@@ -613,21 +612,37 @@ class _WindowsPowerShellTransport:
         )
 
     def run(self, script: str, *, timeout: float = 120) -> ManagementResult:
-        with _vm_lock(self.vm_name):
-            return self._execute_script(script, timeout=timeout)
+        if timeout <= 0:
+            return _transport_failure("Management timeout must be positive.")
+        # The absolute deadline is captured BEFORE the per-VM lock wait so a
+        # contended lock can never extend the caller's bounded budget.
+        deadline = self.clock() + timeout
+        lock = _vm_lock(self.vm_name)
+        remaining = self._remaining(deadline)
+        if remaining <= 0 or not lock.acquire(timeout=remaining):
+            return _timeout_result()
+        try:
+            return self._execute_script(script, _deadline=deadline)
+        finally:
+            lock.release()
 
     def stage(self, source: Path, name: str, *, timeout: float = 300) -> ManagementResult:
         safe_name = safe_stage_name(name)
+        if timeout <= 0:
+            return _transport_failure("Management timeout must be positive.")
+        # The source read and the per-VM lock wait both consume the same
+        # absolute staging budget.
+        deadline = self.clock() + timeout
         try:
             content = source.read_bytes()
         except OSError as exc:
             return _transport_failure("Staged artifact could not be read.", stderr=str(exc))
         destination = f"{_WINDOWS_TRANSPORT_ROOT}\\{safe_name}"
-        with _vm_lock(self.vm_name):
-            if timeout <= 0:
-                return _transport_failure("Management timeout must be positive.")
-            # One bounded deadline governs the whole staging operation.
-            deadline = self.clock() + timeout
+        lock = _vm_lock(self.vm_name)
+        remaining = self._remaining(deadline)
+        if remaining <= 0 or not lock.acquire(timeout=remaining):
+            return _timeout_result()
+        try:
             bootstrap = self._ensure_guest_root(deadline)
             if bootstrap is not None:
                 return bootstrap
@@ -641,7 +656,7 @@ class _WindowsPowerShellTransport:
             )
             verification = self._execute_script(
                 _verification_script(destination, expected),
-                timeout=self._remaining(deadline),
+                _deadline=deadline,
                 _bootstrap=False,
             )
             if (
@@ -657,6 +672,8 @@ class _WindowsPowerShellTransport:
                 stdout="",
                 marker_verified=True,
             )
+        finally:
+            lock.release()
 
     def _remaining(self, deadline: float) -> float:
         """Remaining budget of the current operation; never negative."""
@@ -1102,10 +1119,13 @@ class _WindowsPowerShellTransport:
         return None
 
     def _execute_script(
-        self, script: str, *, timeout: float, _bootstrap: bool = True
+        self, script: str, *, _deadline: float, _bootstrap: bool = True
     ) -> ManagementResult:
-        if timeout <= 0:
-            return _transport_failure("Management timeout must be positive.")
+        # The caller's bounded budget may have expired before entry (for
+        # example while waiting for the per-VM lock): fail closed without
+        # issuing any guest call.
+        if self._remaining(_deadline) <= 0:
+            return _timeout_result()
         encoded = script.encode("utf-8")
         if len(encoded) > _MAX_SCRIPT_BYTES:
             return _transport_failure(
@@ -1113,7 +1133,7 @@ class _WindowsPowerShellTransport:
             )
         digest = hashlib.sha256(encoded).hexdigest()[:16]
         body_logical, frame_logical = self._digest_logical_paths(digest)[:2]
-        deadline = self.clock() + timeout
+        deadline = _deadline
 
         if _bootstrap:
             bootstrap = self._ensure_guest_root(deadline)
@@ -1507,15 +1527,23 @@ _PROBE_TOTAL_BUDGET: Final = 300.0
 # artifact is still detected.
 _PROBE_CLEAN_SCRIPT: Final = (
     "$rfRoot = '" + _WINDOWS_TRANSPORT_ROOT + "'\n"
-    "$rfPrefix = ''\n"
+    "$rfOwnPattern = ''\n"
     "if ($PSCommandPath) {\n"
     "    $rfStem = [System.IO.Path]::GetFileNameWithoutExtension($PSCommandPath)\n"
-    "    $rfDigest = $rfStem -replace '^rf-' , '' -replace '\\.body$' , ''\n"
-    "    if ($rfDigest -match '^[0-9a-f]{16}$') { $rfPrefix = 'rf-' + $rfDigest + '.' }\n"
+    # Strip the generation suffix too: an escalated body name such as
+    # rf-<digest>-r1.body derives the same digest prefix as generation zero,
+    # so the check never counts its own in-flight files as residue.
+    "    $rfDigest = $rfStem -replace '^rf-' , '' -replace '(-r\\d+)?\\.body$' , ''\n"
+    "    if ($rfDigest -match '^[0-9a-f]{16}$') { "
+    "$rfOwnPattern = '^rf-' + $rfDigest + '(-r\\d+)?\\.' }\n"
     "}\n"
-    "if ($rfPrefix) {\n"
+    # The escalated -rN variants of this operation's own files (for example
+    # rf-<digest>-r1.body.ps1) also carry the digest and are excluded by the
+    # same prefix pattern, so an escalated workspace check never counts its
+    # own in-flight files as residue.
+    "if ($rfOwnPattern) {\n"
     "    $rfCount = @(Get-ChildItem -LiteralPath $rfRoot -Force | "
-    "Where-Object { -not $_.Name.StartsWith($rfPrefix) }).Count\n"
+    "Where-Object { $_.Name -notmatch $rfOwnPattern }).Count\n"
     "} else {\n"
     "    $rfCount = @(Get-ChildItem -LiteralPath $rfRoot -Force).Count\n"
     "}\n"
@@ -1695,4 +1723,3 @@ def probe_windows_management(
     return _run_readiness_probe(
         channel, expected_architecture=expected_architecture, clock=clock
     )
-

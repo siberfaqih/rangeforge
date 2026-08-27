@@ -439,12 +439,20 @@ class FakeGuest:
             output = f"RF_GONE:{0 if still_present else 1}\n"
         elif "RF_CLEAN" in body:
             # Same exclusion rule as the fixed probe script: only this
-            # operation's own digest prefix is excluded.
-            prefix = f"{ROOT}\\rf-{digest}."
+            # operation's own digest prefix is excluded, derived from the
+            # body path ($PSCommandPath in the guest) and stripping the
+            # escalated -rN suffix. Both gen-0 and escalated -rN variants
+            # of the operation's own files are excluded by the same prefix
+            # pattern, so an escalated workspace check never counts its own
+            # in-flight files as residue.
+            stem = body_path.rsplit("\\", 1)[-1].removesuffix(".ps1")
+            derived = re.sub(r"^rf-|(-r\d+)?\.body$", "", stem)
+            own_pattern = re.compile(rf"rf-{re.escape(derived)}(?:-r\d+)?\.")
             count = sum(
                 1
                 for name in self.files
-                if name.startswith(ROOT + "\\") and not name.startswith(prefix)
+                if name.startswith(ROOT + "\\")
+                and own_pattern.match(name.rsplit("\\", 1)[-1]) is None
             )
             output = f"RF_CLEAN:{count}\n"
         custom = re.search(r"^#FAKE:OUTPUT:(.*)$", body, re.MULTILINE)
@@ -1614,7 +1622,8 @@ class TestProbeIntegration:
 
         script = management_module._PROBE_CLEAN_SCRIPT
         assert "$PSCommandPath" in script
-        assert "StartsWith($rfPrefix)" in script
+        assert "$rfOwnPattern" in script
+        assert "-notmatch $rfOwnPattern" in script
         assert ROOT in script
         # No circular self-hashing: the script never computes a hash of itself.
         assert "hash" not in script.lower()
@@ -2228,6 +2237,135 @@ class TestProbeBudget:
             transport, expected_architecture=Architecture.ARM64
         )
         assert probe.ok is True
+
+
+class TestAbsoluteDeadlineUnderLockContention:
+    """The bounded deadline is absolute: a contended per-VM lock cannot extend it."""
+
+    def test_expired_deadline_after_lock_wait_fails_closed_without_guest_calls(
+        self,
+    ) -> None:
+        """Waits: when the lock is held past the deadline, no guest call runs."""
+        import threading
+
+        import rangeforge.runtime.management as management_module
+
+        fake = FakeGuest()
+        manager = _WindowsPowerShellTransport(
+            executable=UTMCTL,
+            vm_name="rf-lock-deadline",
+            runner=fake.run,
+            file_runner=fake.file_run,
+            sleeper=fake.sleeper,
+        )
+        # Pre-acquire the per-VM lock so the transport blocks waiting for it.
+        lock = management_module._vm_lock("rf-lock-deadline")
+        lock.acquire()
+
+        def release_later() -> None:
+            lock.release()
+
+        release = threading.Timer(0.05, release_later)
+        release.start()
+        try:
+            result = manager.run("exit 0\n", timeout=0.01)
+        finally:
+            # Never leak the global per-VM lock into later tests, even when an
+            # assertion or transport call fails.
+            release.join(timeout=1.0)
+            if lock.locked():
+                lock.release()
+        # The deadline expired before the lock became available: fail closed
+        # and never issue a guest command.
+        assert result.outcome is ManagementOutcome.TIMEOUT
+        assert fake.commands == []
+        assert fake.uploads == []
+        assert not lock.locked()
+
+    def test_healthy_run_still_completes_within_budget(self) -> None:
+        """A normal run without contention completes unchanged."""
+        fake = FakeGuest()
+        manager = transport(fake)
+        result = manager.run("exit 0\n", timeout=120)
+        assert result.outcome is ManagementOutcome.COMPLETED
+
+    def test_stage_lock_wait_is_bounded_and_released(
+        self, tmp_path: Path
+    ) -> None:
+        import threading
+
+        import rangeforge.runtime.management as management_module
+
+        source = tmp_path / "payload.bin"
+        source.write_bytes(b"payload")
+        fake = FakeGuest()
+        vm_name = "rf-stage-lock-deadline"
+        manager = _WindowsPowerShellTransport(
+            executable=UTMCTL,
+            vm_name=vm_name,
+            runner=fake.run,
+            file_runner=fake.file_run,
+            sleeper=fake.sleeper,
+        )
+        lock = management_module._vm_lock(vm_name)
+        lock.acquire()
+        release = threading.Timer(0.05, lock.release)
+        release.start()
+        try:
+            result = manager.stage(source, "payload.bin", timeout=0.01)
+        finally:
+            release.join(timeout=1.0)
+            if lock.locked():
+                lock.release()
+        assert result.outcome is ManagementOutcome.TIMEOUT
+        assert fake.commands == []
+        assert fake.uploads == []
+        assert not lock.locked()
+
+
+class TestEscalatedWorkspaceClean:
+    """The workspace check excludes its own escalated -rN body files."""
+
+    def test_escalated_workspace_clean_script_reports_clean(self) -> None:
+        """An escalated clean body derives the same digest prefix as gen zero.
+
+        Regression: an escalated body name such as ``rf-<digest>-r1.body.ps1``
+        must still exclude its own in-flight files so the workspace check
+        reports RF_CLEAN:0 instead of counting its own files as residue.
+        """
+        import rangeforge.runtime.management as management_module
+
+        script = management_module._PROBE_CLEAN_SCRIPT
+        digest = digest_of(script)
+        body_zero = f"{ROOT}\\rf-{digest}.body.ps1"
+        fake = FakeGuest(
+            locked_push_paths={body_zero},
+            locked_pull_paths={body_zero},
+        )
+        fake.directories.add(ROOT)
+        # A resident file that exactly matches the script is our own stale
+        # artifact, so the push over the locked gen-zero name escalates.
+        fake.files[body_zero] = script.encode("utf-8-sig")
+        manager = transport(fake)
+        result = manager.run(script, timeout=120)
+        assert result.outcome is ManagementOutcome.COMPLETED
+        assert result.exit_code == 0
+        assert result.stdout.strip() == "RF_CLEAN:0"
+
+    def test_near_prefix_foreign_residue_is_not_excluded(self) -> None:
+        import rangeforge.runtime.management as management_module
+
+        script = management_module._PROBE_CLEAN_SCRIPT
+        digest = digest_of(script)
+        fake = FakeGuest()
+        manager = transport(fake)
+        assert manager.run("exit 0\n", timeout=120).outcome is ManagementOutcome.COMPLETED
+        foreign = f"{ROOT}\\rf-{digest}-rogue.bin"
+        fake.files[foreign] = b"foreign"
+        fake.locked_pull_paths.add(foreign)
+        result = manager.run(script, timeout=120)
+        assert result.outcome is ManagementOutcome.COMPLETED
+        assert result.stdout.strip() == "RF_CLEAN:1"
 
 
 class TestUnverifiedUploadNeverSubmits:

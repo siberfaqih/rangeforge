@@ -363,9 +363,17 @@ class RuntimePrimitiveEngine:
         """Reject non-shell transports before any guest command is issued.
 
         Runtime primitive manifests are ``.sh`` shell implementations for
-        Linux guests; a PowerShell transport must never execute them.
+        Linux guests; a PowerShell transport must never execute them. The
+        declared execution language is mandatory — a transport that does not
+        declare it is rejected by default (default-deny), never assumed
+        shell-capable.
         """
-        language = getattr(transport, "language", ExecutionLanguage.SHELL)
+        language = getattr(transport, "language", None)
+        if not isinstance(language, ExecutionLanguage):
+            raise ProvisioningError(
+                "Runtime primitives require an explicitly declared Linux shell "
+                "management transport; got no declared execution language."
+            )
         if language is not ExecutionLanguage.SHELL:
             raise ProvisioningError(
                 "Runtime primitives require the Linux shell management transport; "
