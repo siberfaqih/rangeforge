@@ -33,6 +33,10 @@ management transport is infrastructure control for owned scenario clones; it nev
 enters attack graphs. Production profile policy remains default-deny for Windows attack
 graphs, credentials, student users, flags, vulnerabilities, and provisioning.
 
+Phase 5 task status, scope boundaries, acceptance criteria, and release gates are tracked
+in [`docs/roadmap/phase-5.md`](docs/roadmap/phase-5.md). Task 5.4, Windows runtime
+lifecycle, is the current task; Tasks 5.5 and 5.6 remain planned and default-deny.
+
 ## Core guarantees
 
 - One seeded randomizer owns every generation-time random decision.
