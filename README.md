@@ -20,15 +20,18 @@ logical scenario generation separate from runtime deployment.
 | VM runtime on supported AMD64 hosts | Vagrant |
 | Ubuntu 24.04 ARM64 and AMD64 images | Supported |
 | Windows 11 ARM64 image planning and readiness | Supported with manual media and UTM |
-| Windows 11 AMD64 compatibility planning | Supported; media and local Vagrant base remain operator-supplied |
+| Windows 11 AMD64 compatibility planning | Planning only; media is operator-supplied and the lifecycle is unvalidated on a real x86 host |
+| Windows 11 ARM64 management transport | Supported on owned UTM clones via QEMU Guest Agent and built-in PowerShell; validated on one real owned clone (READY plus the gated runtime smoke), then destroyed with its base preserved |
+| Windows Vagrant management | Unsupported |
 | Windows scenario generation and provisioning | Not enabled |
 | Curated CVE runtime | CVE-2023-46604 on owned Linux scenario clones |
 | Docker runtime model | Supported; current vulnerable primitives remain VM-only |
 
 Windows is represented by the same generic guest, image, planner, template, and backend
-models as Linux. There is no parallel Windows runtime architecture. Production profile
-policy remains default-deny for Windows attack graphs, management transport, credentials,
-and provisioning.
+models as Linux. There is no parallel Windows runtime architecture. The Windows
+management transport is infrastructure control for owned scenario clones; it never
+enters attack graphs. Production profile policy remains default-deny for Windows attack
+graphs, credentials, student users, flags, vulnerabilities, and provisioning.
 
 ## Core guarantees
 
@@ -114,6 +117,90 @@ VALID or INVALID
 Attack graphs contain logical transitions, not guest commands. Runtime primitive manifests
 map selected techniques to provisioners and validators only after platform, architecture,
 runtime, and backend compatibility has been established.
+
+### Windows management transport
+
+Windows 11 ARM64 management is available only through UTM directly, the QEMU Guest Agent,
+and the built-in Windows PowerShell interpreter:
+
+```text
+Persisted Ownership Metadata
+      |
+Identity, Platform, Architecture, Backend, and Template Validation
+      |
+Allowlisted Transport Tuple (windows / utm / QGA / PowerShell)
+      |
+utmctl exec with Fixed PowerShell argv
+      |
+Content-Bound Completion Marker and Bounded Output
+      |
+Fixed Internal Readiness Probe
+```
+
+The transport is infrastructure control and never attack-graph data. It resolves every
+parameter from `scenario.yaml` and persisted RangeForge-owned runtime metadata; no public
+API or CLI accepts an arbitrary IP, hostname, VM name, directory, guest command, or
+target. Scripts run
+through the absolute built-in Windows PowerShell executable with fixed argv (`-NoLogo`,
+`-NoProfile`, `-NonInteractive`, `-ExecutionPolicy Bypass`, `-File`), upload with UTF-8
+BOM encoding compatible with Windows PowerShell 5.1, use deterministic content-derived
+names under the fixed guest root `C:\ProgramData\RangeForge\Transport`, preserve guest
+exit status through a hash-bound completion marker, enforce one bounded deadline, bound
+output size. Cleanup is verified before a result is reported as success; error paths run
+best-effort cleanup within the remaining budget, and an expired deadline may intentionally
+leave residue that the next operation's pre-clean or bootstrap sweep removes.
+`utmctl exec` submission is
+asynchronous and `utmctl file pull` is judged semantically (host code 0 alone is never
+success), so every launch is followed by bounded polling for an observable marker and
+verified file cleanup. Every PowerShell script upload is read-back verified against its
+exact content before exec submission; that verification is
+patient and bounded only by the operation deadline, since cold-boot pull
+visibility can be slow. If a push hits a guest-side locked artifact left by
+an earlier wedged boot, the transport verifies the resident file is its own
+stale artifact and escalates to a bounded deterministic suffixed name (at
+most three attempts per logical name) instead of re-pushing over a poisoned
+inode or executing unverified resident files; anything else fails closed.
+Before any real work, a disposable self-deleting warmup probe in the fixed
+Temp directory absorbs the cold-boot exec wedge — a submission inside that
+wedge permanently locks its target file on the guest, so the probe keeps
+such poisoning away from Transport-root work files. After bootstrap
+readiness, a one-shot fixed sweep removes every `rf-*` entry inside only
+the RangeForge transport root on the owned clone — recovering clones
+damaged by earlier interrupted operations whose files stayed QGA-locked
+until the channel was healthy — and never touches any other path. Cleanup
+globs remove escalated name variants too, and digest-scoped absence
+verification always resolves only the current generation, computed after
+all escalation decisions of the operation.
+A clean code-0 exec submission is asynchronous: the guest command executes
+later (delays up to tens of seconds observed), so only the hash-bound
+completion marker or observed self-deletion is authoritative. Code 0 with
+`Timed out waiting for RPC` provably means the request was not delivered;
+it is retried with presence-guarded bounded backoff and is the only
+retryable diagnostic — any other result fails closed. A mandatory
+digest-scoped pre-clean prevents stale result replay
+for repeated identical scripts. Script content, encoded payloads, credentials, and secret
+canaries never appear in errors, logs, or metadata.
+
+Management readiness is never derived from IP discovery alone for Windows clones. After a
+clone is running, a fixed internal probe verifies agent execution, the expected PowerShell
+major version and the hardware CPU architecture reported by WMI (immune to emulated
+process views), file round-trip, exit-code propagation, marker integrity, and workspace
+cleanup. The whole probe shares one bounded 300-second budget; when it is exhausted, the
+remaining checks fail closed without further guest calls. The probe creates no
+vulnerability, student account, flag, credential, or persistent service, and it can never
+target a shared base template. Failure leaves management NOT_READY or UNAVAILABLE.
+
+Windows Vagrant management is denied deterministically at planning time (the runtime plan
+is incompatible and non-deployable) and again before any backend call during lifecycle and
+transport construction. Linux UTM/QGA and Vagrant SSH behavior is unchanged.
+
+The transport is covered by deterministic offline tests, including a filesystem-faithful
+QGA simulation of warmup, bootstrap, sweep, marker, escalation, and probe behavior.
+Operational validation has been performed once against a real Windows 11 ARM64 UTM clone:
+the owned clone reached management READY through `up`, the explicitly gated runtime smoke
+test passed end-to-end, and the clone was then destroyed with its source image and shared
+base template preserved. Broader Windows management support still requires per-host
+operator validation via that gated smoke test.
 
 ### Curated CVE resolution
 
@@ -204,7 +291,7 @@ VM backend selection follows the normalized host, not user preference:
 | macOS ARM64 / Apple Silicon | UTM directly |
 | macOS AMD64 | Vagrant |
 | Linux AMD64 | Vagrant |
-| Windows AMD64 | Vagrant |
+| Windows AMD64 | Vagrant (denied for Windows guests at planning time) |
 | Other combinations | Unsupported |
 
 Windows image identities are exact and architecture-specific:
@@ -290,7 +377,10 @@ fingerprint.
 
 Scenario runtime state is stored beside `scenario.yaml` under `runtime/`. The metadata
 records the deterministic scenario identity, backend, VM name, template reference,
-architecture, management state, provisioning state, and validation state.
+architecture, guest platform, management transport, execution language, management state,
+provisioning state, and validation state. Metadata written before platform-aware builds
+remains readable and is only ever treated as Linux-capable; it is never inferred as
+Windows-capable.
 
 Destructive operations validate the scenario identity and RangeForge ownership token before
 deleting anything. They preserve:
@@ -380,10 +470,16 @@ CI and development tests remain deterministic, offline, and side-effect free.
 ## Current limitations
 
 - Production scenario generation is Linux-only.
-- Windows management transport, provisioning, attack graphs, Active Directory, and Windows
-  Server are not implemented.
-- Windows AMD64 has deterministic schema and lifecycle coverage but has not been validated on
-  a real x86 host.
+- Windows provisioning, attack graphs, student users, flags, vulnerabilities, Active
+  Directory, and Windows Server are not implemented.
+- The Windows management transport covers Windows 11 ARM64 on UTM only; Windows Vagrant
+  management is denied at planning time and before any backend call. The transport was
+  validated once against a real owned Windows 11 ARM64 UTM clone (management READY plus
+  the gated runtime smoke test, clone destroyed afterwards, base preserved); new hosts
+  should repeat that gated smoke test before relying on it.
+- Windows AMD64 has deterministic schema and planning coverage only; its lifecycle has not
+  been validated on a real x86 host and remains non-deployable until reviewed media and a
+  clean local Vagrant base are registered.
 - Interactive UTM and Windows installation are operator-managed.
 - Current vulnerable runtime primitives are VM-backed; Docker content remains limited.
 - The student target currently uses the backend-discovered VM network; a dedicated isolated

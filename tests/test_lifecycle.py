@@ -24,6 +24,7 @@ from rangeforge.images.templates import TemplateManager
 from rangeforge.models import Scenario, TrainingProfile
 from rangeforge.primitives.registry import PrimitiveRegistry
 from rangeforge.runtime.backends.vagrant import VagrantBackend
+from rangeforge.runtime.guest import ExecutionLanguage, GuestPlatform
 from rangeforge.runtime.lifecycle import LifecycleError, ScenarioLifecycle
 from rangeforge.runtime.metadata import (
     RuntimeMetadataError,
@@ -36,6 +37,7 @@ from rangeforge.runtime.models import (
     BackendType,
     GuestPlan,
     ImagePlanStatus,
+    ManagementTransportKind,
     RuntimePlan,
     RuntimeResolution,
     RuntimeType,
@@ -337,6 +339,86 @@ def test_manual_vagrant_template_reference_builds_scenario_environment(
     scenario: Scenario,
     tmp_path: Path,
 ) -> None:
+    content = b"reviewed linux amd64 media"
+    manifest = ImageManifest(
+        id="ubuntu-24.04-amd64",
+        os=ImageOS(family="linux", distribution="ubuntu", version="24.04"),
+        architecture=Architecture.AMD64,
+        runtimes=(RuntimeType.VM,),
+        backends=(VMBackend.VAGRANT,),
+        source=ImageSource(
+            type=ImageSourceType.OFFICIAL,
+            vendor="canonical",
+            artifact_format=ArtifactFormat.ISO,
+            version="test",
+            filename="ubuntu-24.04-amd64.iso",
+            acquisition=ImageAcquisitionMethod.MANUAL,
+        ),
+        checksum=Checksum(value=hashlib.sha256(content).hexdigest()),
+    )
+    cache = ImageCache(tmp_path / "images")
+    cache.ensure()
+    cache.artifact_path(manifest).write_bytes(content)
+    manager = ImageManager(ImageRegistry((manifest,)), cache)
+    templates = TemplateManager(manager)
+    reference = "rf-base-ubuntu-24.04-amd64"
+    vagrant = FakeVagrant({reference})
+    templates.prepare(
+        manifest.id,
+        VMBackend.VAGRANT,
+        vagrant,
+        reference=reference,
+    )
+
+    host = HostInfo(os=HostOS.LINUX, architecture=Architecture.AMD64, apple_silicon=False)
+    plan = RuntimePlan(
+        scenario_id=scenario.scenario.id,
+        host=host,
+        runtime=RuntimeResolution(
+            runtime=RuntimeType.VM,
+            backend=VMBackend.VAGRANT,
+            guest_architecture=Architecture.AMD64,
+            compatible=True,
+            reason="AMD64 VM hosts use Vagrant.",
+        ),
+        backend_status=BackendStatus(backend=BackendType.VAGRANT, available=True),
+        guest=GuestPlan(
+            family="linux",
+            distribution="ubuntu",
+            version="24.04",
+            architecture=Architecture.AMD64,
+            image_id=manifest.id,
+        ),
+        image_status=ImagePlanStatus(
+            acquisition="manual", source="ready", template="ready"
+        ),
+        compatible=True,
+        deployable=True,
+        next_action="Runtime prerequisites are ready for the scenario lifecycle.",
+    )
+    scenario_path = ScenarioYamlSerializer().dump(scenario, tmp_path / "scenarios")
+    lifecycle = ScenarioLifecycle(
+        template_manager=templates,
+        host=host,
+        utm=FakeUTM("unused"),  # type: ignore[arg-type]
+        vagrant=vagrant,  # type: ignore[arg-type]
+        sleeper=lambda _: None,
+    )
+
+    result = lifecycle.build(scenario, scenario_path, plan)
+    assert result.changed
+    assert vagrant.prepared_boxes == [VagrantBox(name=reference)]
+    assert result.metadata is not None
+    assert result.metadata.template.name == reference
+    assert result.metadata.guest.platform is GuestPlatform.LINUX
+    assert result.metadata.guest.management_transport is ManagementTransportKind.VAGRANT_SSH
+    assert result.metadata.guest.execution_language is ExecutionLanguage.SHELL
+
+
+def test_windows_vagrant_build_rejected_before_backend_calls(
+    scenario: Scenario,
+    tmp_path: Path,
+) -> None:
     content = b"reviewed windows amd64 media"
     manifest = ImageManifest(
         id="windows-11-amd64",
@@ -412,8 +494,6 @@ def test_manual_vagrant_template_reference_builds_scenario_environment(
         sleeper=lambda _: None,
     )
 
-    result = lifecycle.build(windows_scenario, scenario_path, plan)
-    assert result.changed
-    assert vagrant.prepared_boxes == [VagrantBox(name=reference)]
-    assert result.metadata is not None
-    assert result.metadata.template.name == reference
+    with pytest.raises(LifecycleError, match="Windows Vagrant management is unsupported"):
+        lifecycle.build(windows_scenario, scenario_path, plan)
+    assert vagrant.prepared_boxes == []

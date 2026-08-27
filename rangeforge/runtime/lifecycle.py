@@ -8,13 +8,23 @@ from collections.abc import Callable
 from pathlib import Path
 
 from rangeforge.host.models import HostInfo
+from rangeforge.images.manager import ImageManagerError
 from rangeforge.images.models import VagrantBox
 from rangeforge.images.templates import TemplateManager
 from rangeforge.models import Scenario
 from rangeforge.runtime.backends.base import BackendOperationError
 from rangeforge.runtime.backends.utm import UTMBackend
 from rangeforge.runtime.backends.vagrant import VagrantBackend
+from rangeforge.runtime.guest import GuestPlatform
+from rangeforge.runtime.management import (
+    ManagementTransportError,
+    effective_guest_platform,
+    management_language,
+    management_transport_kind,
+    probe_windows_management,
+)
 from rangeforge.runtime.metadata import (
+    RuntimeMetadataError,
     RuntimeMetadataStore,
     scenario_managed_id,
     scenario_vm_name,
@@ -34,6 +44,18 @@ from rangeforge.runtime.models import (
 
 class LifecycleError(RuntimeError):
     """Raised for expected, actionable lifecycle failures."""
+
+
+_WINDOWS_MANAGEMENT_SETTLE_SECONDS = 10.0
+
+
+def _guest_platform_from_family(family: str) -> GuestPlatform:
+    """Resolve a profile guest family onto its typed guest platform."""
+    normalized = family.strip().lower()
+    for platform in GuestPlatform:
+        if platform.value == normalized:
+            return platform
+    raise LifecycleError(f"Unknown guest family: {family!r}.")
 
 
 class ScenarioLifecycle:
@@ -62,6 +84,14 @@ class ScenarioLifecycle:
         assert plan.runtime.backend is not None
         assert plan.guest is not None and plan.guest.image_id is not None
         backend = plan.runtime.backend
+        platform = _guest_platform_from_family(plan.guest.family)
+        if platform is GuestPlatform.WINDOWS and backend is VMBackend.VAGRANT:
+            # Enforced before any backend runner call: Windows management is
+            # UTM/QGA-only and Windows Vagrant remains explicitly unsupported.
+            raise LifecycleError(
+                "Windows Vagrant management is unsupported; Windows scenarios "
+                "require the UTM backend with the QEMU Guest Agent."
+            )
         template = self.template_manager.require_ready(plan.guest.image_id, backend)
         if template.architecture != self.host.architecture:
             raise LifecycleError(
@@ -122,7 +152,12 @@ class ScenarioLifecycle:
                 name=template.reference,
                 fingerprint=template.fingerprint,
             ),
-            guest=RuntimeGuestState(architecture=template.architecture),
+            guest=RuntimeGuestState(
+                architecture=template.architecture,
+                platform=platform,
+                management_transport=management_transport_kind(backend),
+                execution_language=management_language(platform, backend),
+            ),
         )
         store.save(metadata)
         return LifecycleResult(
@@ -184,7 +219,19 @@ class ScenarioLifecycle:
         while not addresses and time.monotonic() <= deadline:
             self.sleeper(min(1.0, max(timeout, 0.01)))
             addresses = self._ip_addresses(metadata, store)
-        ready = bool(addresses)
+        # IP discovery alone never proves Windows management readiness; an
+        # owned running Windows clone must pass the fixed internal probe.
+        failed_checks: tuple[str, ...] = ()
+        if effective_guest_platform(metadata) is GuestPlatform.WINDOWS:
+            # UTM can report a QGA-backed IP before the Windows guest agent's
+            # file and exec RPC channels are stable. Starting PowerShell in
+            # that interval can wedge command RPC until the guest restarts.
+            # This bounded settle window does not imply readiness; the fixed
+            # ownership-gated probe below remains the only READY signal.
+            self.sleeper(_WINDOWS_MANAGEMENT_SETTLE_SECONDS)
+            ready, failed_checks = self._verify_windows_management(scenario, scenario_path)
+        else:
+            ready = bool(addresses)
         running = starting.model_copy(
             update={
                 "vm": starting.vm.model_copy(update={"state": VMState.RUNNING}),
@@ -201,11 +248,17 @@ class ScenarioLifecycle:
             }
         )
         store.save(running)
-        message = (
-            "Scenario VM is running and management is ready."
-            if ready
-            else "Scenario VM is running, but guest management connectivity is not ready."
-        )
+        if ready:
+            message = "Scenario VM is running and management is ready."
+        elif failed_checks:
+            message = (
+                "Scenario VM is running, but guest management readiness checks "
+                f"failed: {', '.join(failed_checks)}."
+            )
+        else:
+            message = (
+                "Scenario VM is running, but guest management connectivity is not ready."
+            )
         return LifecycleResult(changed=True, message=message, metadata=running)
 
     def status(self, scenario: Scenario, scenario_path: Path) -> LifecycleResult:
@@ -216,17 +269,25 @@ class ScenarioLifecycle:
         store.validate_ownership(scenario, metadata)
         state = self._state(metadata, store)
         addresses = self._ip_addresses(metadata, store) if state is VMState.RUNNING else ()
+        if effective_guest_platform(metadata) is GuestPlatform.WINDOWS:
+            # Windows management readiness comes only from the internal probe;
+            # backend IP discovery alone never marks it READY, and a VM that
+            # is no longer running can never retain READY.
+            if state is VMState.RUNNING:
+                management = metadata.guest.management
+            else:
+                management = ManagementState.NOT_READY
+        else:
+            management = (
+                ManagementState.READY if addresses else ManagementState.NOT_READY
+            )
         updated = metadata.model_copy(
             update={
                 "vm": metadata.vm.model_copy(update={"state": state}),
                 "guest": metadata.guest.model_copy(
                     update={
                         "ip": addresses[0] if addresses else None,
-                        "management": (
-                            ManagementState.READY
-                            if addresses
-                            else ManagementState.NOT_READY
-                        ),
+                        "management": management,
                     }
                 ),
             }
@@ -259,6 +320,32 @@ class ScenarioLifecycle:
                 self._remove_vagrant_directory(store)
         store.remove()
         return LifecycleResult(changed=True, message="Scenario VM was destroyed.")
+
+    def _verify_windows_management(
+        self, scenario: Scenario, scenario_path: Path
+    ) -> tuple[bool, tuple[str, ...]]:
+        """Probe management readiness on an owned running Windows UTM clone.
+
+        The probe never targets a shared base template: transport construction
+        validates persisted ownership metadata first. Any failure leaves
+        management NOT_READY/UNAVAILABLE.
+        """
+        try:
+            probe = probe_windows_management(
+                scenario,
+                scenario_path,
+                host=self.host,
+                utm=self.utm,
+                vagrant=self.vagrant,
+                template_manager=self.template_manager,
+                expected_architecture=self.host.architecture,
+            )
+        except (ManagementTransportError, ImageManagerError, RuntimeMetadataError):
+            # Persisted-metadata races, tampering, and template-registry
+            # failures must leave management unavailable instead of escaping.
+            return False, ("management_transport_unavailable",)
+        failed = tuple(check.name for check in probe.checks if not check.passed)
+        return probe.ok, failed
 
     def _resource_exists(
         self, metadata: RuntimeMetadata, store: RuntimeMetadataStore

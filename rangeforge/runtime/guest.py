@@ -6,8 +6,9 @@ platform transitions anywhere else. Valid host/runtime/backend combinations
 are reused from the authoritative runtime resolver policy instead of being
 duplicated as independent sets. Windows guests are recognized for VM-based
 compatibility planning on native ARM64/AMD64 hosts only; Docker, member-server
-and domain-controller roles, and execution languages remain denied, and no
-cross-architecture emulation is permitted.
+and domain-controller roles remain denied, and no cross-architecture emulation
+is permitted. The only declared Windows execution language is built-in
+PowerShell over the UTM QEMU Guest Agent management transport.
 """
 
 from __future__ import annotations
@@ -18,17 +19,28 @@ from types import MappingProxyType
 
 from rangeforge.host.models import Architecture, HostInfo
 from rangeforge.models import StrictModel
-from rangeforge.runtime.models import RuntimeType, VMBackend
+from rangeforge.runtime.models import (
+    ExecutionLanguage,
+    GuestPlatform,
+    RuntimeType,
+    VMBackend,
+)
 from rangeforge.runtime.resolver import VM_HOST_BACKENDS
 
 _SUPPORTED_HOST_ARCHITECTURES = frozenset({Architecture.ARM64, Architecture.AMD64})
 
 
-class GuestPlatform(StrEnum):
-    """Logical guest platform families RangeForge can reason about."""
-
-    LINUX = "linux"
-    WINDOWS = "windows"
+__all__ = [
+    "GUEST_CAPABILITIES",
+    "ExecutionLanguage",
+    "GuestCapabilities",
+    "GuestCompatibility",
+    "GuestCompatibilityError",
+    "GuestPlatform",
+    "GuestRole",
+    "check_guest_compatibility",
+    "guest_capabilities",
+]
 
 
 class GuestRole(StrEnum):
@@ -37,14 +49,6 @@ class GuestRole(StrEnum):
     STANDALONE = "standalone"
     MEMBER_SERVER = "member_server"
     DOMAIN_CONTROLLER = "domain_controller"
-
-
-class ExecutionLanguage(StrEnum):
-    """Execution languages available for primitive provisioning on a guest."""
-
-    SHELL = "shell"
-    POWERSHELL = "powershell"
-    PYTHON = "python"
 
 
 class GuestCapabilities(StrictModel):
@@ -72,18 +76,19 @@ _LINUX_CAPABILITIES = GuestCapabilities(
     roles=(GuestRole.STANDALONE,),
 )
 
-# Phase 5.2: Windows guests are recognized for VM-based compatibility
-# planning on native ARM64/AMD64 hosts. Docker, member-server and
-# domain-controller roles, and execution languages remain denied, and
-# cross-architecture emulation stays forbidden. Deployment readiness is
-# separately gated on reviewed media checksums; capability metadata never
-# makes an image ready.
+# Windows guests are recognized for VM-based compatibility planning on
+# native ARM64/AMD64 hosts. The built-in PowerShell execution language is
+# declared only because the UTM/QEMU-Guest-Agent management transport and
+# its readiness probe are implemented in ``rangeforge.runtime.management``.
+# Docker, member-server and domain-controller roles, Windows Vagrant
+# management, and cross-architecture emulation stay denied. Capability
+# metadata never makes an image ready and never enables provisioning.
 _WINDOWS_CAPABILITIES = GuestCapabilities(
     platform=GuestPlatform.WINDOWS,
     runtimes=(RuntimeType.VM,),
     architectures=(Architecture.ARM64, Architecture.AMD64),
     roles=(GuestRole.STANDALONE,),
-    execution_languages=(),
+    execution_languages=(ExecutionLanguage.POWERSHELL,),
     cross_architecture_emulation=False,
 )
 
@@ -215,6 +220,14 @@ def check_guest_compatibility(
                 f"VM backend '{backend.value}' is not valid for host "
                 f"{host.os.value}/{host.architecture.value}; "
                 f"'{expected.value}' is required."
+            )
+        # Planning-time denial: Windows management is UTM/QGA-only, so a
+        # Windows VM plan on a Vagrant backend is rejected before any
+        # lifecycle work regardless of the resolved host policy.
+        if resolved is GuestPlatform.WINDOWS and backend is VMBackend.VAGRANT:
+            errors.append(
+                "Windows Vagrant management is unsupported; Windows scenarios "
+                "require the UTM backend with the QEMU Guest Agent."
             )
 
     if (

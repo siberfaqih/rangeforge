@@ -28,6 +28,36 @@ class BackendType(StrEnum):
     VAGRANT = "vagrant"
 
 
+class GuestPlatform(StrEnum):
+    """Logical guest platform families RangeForge can reason about."""
+
+    LINUX = "linux"
+    WINDOWS = "windows"
+
+
+class ExecutionLanguage(StrEnum):
+    """Execution languages available for primitive provisioning on a guest."""
+
+    SHELL = "shell"
+    POWERSHELL = "powershell"
+    PYTHON = "python"
+
+
+class ManagementTransportKind(StrEnum):
+    """Infrastructure control channels used to reach an owned scenario VM."""
+
+    QEMU_GUEST_AGENT = "qemu_guest_agent"
+    VAGRANT_SSH = "vagrant_ssh"
+
+
+class ManagementOutcome(StrEnum):
+    """Typed distinction between guest completion and transport failure."""
+
+    COMPLETED = "completed"
+    TRANSPORT_FAILURE = "transport_failure"
+    TIMEOUT = "timeout"
+
+
 class BackendCapability(StrEnum):
     DEPENDENCY_DETECTION = "dependency_detection"
     VERSION_INSPECTION = "version_inspection"
@@ -148,6 +178,29 @@ class RuntimeGuestState(StrictModel):
     architecture: Architecture
     ip: str | None = None
     management: ManagementState = ManagementState.NOT_READY
+    # Persisted guest platform and management identity. ``None`` means the
+    # metadata predates platform-aware builds; legacy metadata is only ever
+    # read back as Linux-capable and never as Windows-capable.
+    platform: GuestPlatform | None = None
+    management_transport: ManagementTransportKind | None = None
+    execution_language: ExecutionLanguage | None = None
+
+
+class ManagementResult(StrictModel):
+    """Typed result of one management-transport operation.
+
+    ``COMPLETED`` carries the guest process exit code in ``exit_code``.
+    ``TRANSPORT_FAILURE`` and ``TIMEOUT`` never carry a guest exit code and
+    bound their diagnostics so script content, encoded payloads, credentials,
+    or secret canaries can never leak into errors, logs, or metadata.
+    """
+
+    outcome: ManagementOutcome
+    exit_code: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    detail: str | None = None
+    marker_verified: bool = False
 
 
 class ProvisioningStatus(StrictModel):
@@ -173,7 +226,7 @@ class RuntimeMetadata(StrictModel):
     guest: RuntimeGuestState
     provisioning: ProvisioningStatus = ProvisioningStatus()
     validation: RuntimeValidationStatus = RuntimeValidationStatus()
-    metadata_version: int = 2
+    metadata_version: int = 3
 
 
 class LifecycleResult(StrictModel):

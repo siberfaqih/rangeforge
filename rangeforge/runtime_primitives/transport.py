@@ -1,4 +1,10 @@
-"""Trusted guest-command transports derived only from owned runtime metadata."""
+"""Trusted guest-command transports derived only from owned runtime metadata.
+
+The Linux transports here execute root-owned provisioning through the QEMU
+Guest Agent or scenario-specific Vagrant SSH. Windows management is handled
+by the dedicated control plane in ``rangeforge.runtime.management``; there is
+no parallel Windows backend.
+"""
 
 from __future__ import annotations
 
@@ -11,36 +17,41 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from rangeforge.models import Scenario
 from rangeforge.runtime.backends.base import CommandResult
-from rangeforge.runtime.backends.utm import UTMBackend
-from rangeforge.runtime.backends.vagrant import VagrantBackend
-from rangeforge.runtime.metadata import RuntimeMetadataStore
-from rangeforge.runtime.models import RuntimeMetadata, VMBackend
+from rangeforge.runtime.guest import ExecutionLanguage
 
 GuestCommandRunner = Callable[[tuple[str, ...], str, float], CommandResult]
 GuestFileRunner = Callable[[tuple[str, ...], bytes, float], CommandResult]
 
 _COMPLETION_PATTERN = re.compile(r"^RF_TRANSPORT_COMPLETE:(\d+)$", re.MULTILINE)
 
+# Conventional failure codes used by the process runners so callers can
+# distinguish transport timeouts (124) and local failures (125) from guest
+# exit statuses.
+_TIMEOUT_CODE = 124
+_TRANSPORT_ERROR_CODE = 125
+
 
 def run_guest_command(command: tuple[str, ...], script: str, timeout: float) -> CommandResult:
     try:
         completed = subprocess.run(
             command,
-            input=script,
+            input=script.encode("utf-8"),
             capture_output=True,
             check=False,
-            text=True,
             timeout=timeout,
         )
+        # Guest output is decoded explicitly with replacement so arbitrary
+        # guest bytes can never raise UnicodeDecodeError through the runner.
         return CommandResult(
             returncode=completed.returncode,
-            stdout=completed.stdout.strip(),
-            stderr=completed.stderr.strip(),
+            stdout=completed.stdout.decode("utf-8", errors="replace").strip(),
+            stderr=completed.stderr.decode("utf-8", errors="replace").strip(),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return CommandResult(returncode=1, stderr=str(exc))
+    except subprocess.TimeoutExpired:
+        return CommandResult(returncode=_TIMEOUT_CODE, stderr="Guest command timed out.")
+    except OSError as exc:
+        return CommandResult(returncode=_TRANSPORT_ERROR_CODE, stderr=str(exc))
 
 
 def run_guest_file(command: tuple[str, ...], content: bytes, timeout: float) -> CommandResult:
@@ -57,8 +68,10 @@ def run_guest_file(command: tuple[str, ...], content: bytes, timeout: float) -> 
             stdout=completed.stdout.decode(errors="replace").strip(),
             stderr=completed.stderr.decode(errors="replace").strip(),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return CommandResult(returncode=1, stderr=str(exc))
+    except subprocess.TimeoutExpired:
+        return CommandResult(returncode=_TIMEOUT_CODE, stderr="Guest file transfer timed out.")
+    except OSError as exc:
+        return CommandResult(returncode=_TRANSPORT_ERROR_CODE, stderr=str(exc))
 
 
 class GuestTransport(Protocol):
@@ -69,6 +82,8 @@ class GuestTransport(Protocol):
 
 class UTMGuestTransport:
     """Execute root-owned provisioning through the QEMU Guest Agent."""
+
+    language = ExecutionLanguage.SHELL
 
     def __init__(
         self,
@@ -196,6 +211,8 @@ class UTMGuestTransport:
 class VagrantGuestTransport:
     """Execute through Vagrant's scenario-specific SSH configuration."""
 
+    language = ExecutionLanguage.SHELL
+
     def __init__(
         self,
         executable: Path,
@@ -248,25 +265,3 @@ class VagrantGuestTransport:
             f"install -o root -g root -m 0600 -- {temporary} {destination} && rm -f -- {temporary}",
             timeout=timeout,
         )
-
-
-def owned_guest_transport(
-    scenario: Scenario,
-    scenario_path: Path,
-    metadata: RuntimeMetadata,
-    *,
-    utm: UTMBackend,
-    vagrant: VagrantBackend,
-) -> GuestTransport:
-    """Resolve a transport only after scenario ownership and local resource checks."""
-    store = RuntimeMetadataStore(scenario_path)
-    store.validate_ownership(scenario, metadata)
-    if metadata.vm.name == metadata.template.name:
-        raise ValueError("Refusing guest transport to a shared base template.")
-    if metadata.backend is VMBackend.UTM:
-        if utm.executable is None or not utm.vm_exists(metadata.vm.name):
-            raise ValueError("Owned UTM scenario VM is unavailable.")
-        return UTMGuestTransport(utm.executable, metadata.vm.name)
-    if vagrant.executable is None or not vagrant.environment_exists(store.vagrant_directory):
-        raise ValueError("Owned Vagrant scenario environment is unavailable.")
-    return VagrantGuestTransport(vagrant.executable, store.vagrant_directory)
