@@ -291,7 +291,12 @@ def test_runtime_plan_windows_guest_with_unresolvable_image_fails_closed(
     assert not plan.compatible
     assert not plan.deployable
     assert not any("does not support runtime" in issue for issue in plan.issues)
-    assert any("No image matches" in issue for issue in plan.issues)
+    # Planning-time denial: Windows VM plans are UTM/QGA-only, so the
+    # Vagrant-host request is rejected before image resolution runs.
+    assert any(
+        "Windows Vagrant management is unsupported" in issue
+        for issue in plan.issues
+    )
     assert plan.guest is not None
     assert plan.guest.family == "windows"
     assert plan.image_status is None
@@ -534,10 +539,11 @@ def test_runtime_plan_windows_amd64_on_vagrant_host_with_shipped_identity(
     registry: PrimitiveRegistry,
     tmp_path: Path,
 ) -> None:
-    """AMD64 hosts resolve Vagrant/windows-11-amd64 from the shipped identity.
+    """AMD64 hosts resolve Vagrant/windows-11-amd64 from the shipped identity,
+    but planning-time policy denies Windows-on-Vagrant management outright.
 
-    The fixture identity carries no reviewed trust data, so the plan stays
-    compatible but never deployable.
+    The plan records the deterministic denial and never resolves image
+    readiness for a combination that cannot be managed.
     """
     plan = _planner(
         _windows_profile(profile),
@@ -550,20 +556,17 @@ def test_runtime_plan_windows_amd64_on_vagrant_host_with_shipped_identity(
         requested_runtime=RuntimeType.VM,
         host=_amd64_host(HostOS.LINUX),
     )
-    assert plan.compatible
+    assert not plan.compatible
     assert not plan.deployable
+    assert any(
+        "Windows Vagrant management is unsupported" in issue
+        for issue in plan.issues
+    )
     assert plan.runtime.backend is VMBackend.VAGRANT
     assert plan.runtime.guest_architecture is Architecture.AMD64
     assert plan.guest is not None
-    assert plan.guest.image_id == "windows-11-amd64"
-    assert plan.image_status is not None
-    assert plan.image_status.acquisition == "manual"
-    assert plan.image_status.source == "missing"
-    assert plan.next_action == (
-        "This image has no reviewed SHA-256; configure a reviewed checksum "
-        "before its source media can become ready."
-    )
-
+    assert plan.guest.family == "windows"
+    assert plan.image_status is None
 
 def test_runtime_plan_manual_image_with_reviewed_checksum_directs_import(
     profile: TrainingProfile,
@@ -597,8 +600,9 @@ def test_runtime_plan_backend_managed_image_directs_backend_preparation(
     registry: PrimitiveRegistry,
     tmp_path: Path,
 ) -> None:
-    """Backend-managed sources direct operators to their VM backend, not to
-    RangeForge download/import flows."""
+    """Backend-managed sources direct operators to their VM backend — but a
+    Windows-on-Vagrant plan is denied at planning time before any image or
+    backend guidance is produced."""
     plan = _planner(
         _windows_profile(profile),
         registry,
@@ -610,11 +614,13 @@ def test_runtime_plan_backend_managed_image_directs_backend_preparation(
         requested_runtime=RuntimeType.VM,
         host=_amd64_host(HostOS.LINUX),
     )
-    assert plan.compatible
+    assert not plan.compatible
     assert not plan.deployable
-    assert plan.guest is not None
-    assert plan.guest.image_id == "windows-11-amd64"
-    assert plan.next_action == "Prepare the source image through the vagrant backend."
+    assert any(
+        "Windows Vagrant management is unsupported" in issue
+        for issue in plan.issues
+    )
+    assert plan.next_action == "Resolve compatibility errors before deployment."
 
 
 def test_same_windows_scenario_produces_same_runtime_plan(

@@ -31,6 +31,7 @@ from rangeforge.runtime.backends.base import BackendOperationError
 from rangeforge.runtime.backends.utm import UTMBackend
 from rangeforge.runtime.backends.vagrant import VagrantBackend
 from rangeforge.runtime.lifecycle import LifecycleError, ScenarioLifecycle
+from rangeforge.runtime.management import owned_guest_transport
 from rangeforge.runtime.metadata import RuntimeMetadataError
 from rangeforge.runtime.models import LifecycleResult, RuntimePlan, RuntimeType, VMBackend
 from rangeforge.runtime.planner import RuntimePlanner
@@ -47,7 +48,6 @@ from rangeforge.runtime_primitives.loader import (
 )
 from rangeforge.runtime_primitives.models import RuntimeValidationResult
 from rangeforge.runtime_primitives.registry import RuntimeImplementationError
-from rangeforge.runtime_primitives.transport import owned_guest_transport
 from rangeforge.serialization.yaml import ScenarioYamlSerializer
 from rangeforge.validation.scenario import ScenarioValidator
 
@@ -872,9 +872,10 @@ def provision(
         transport = owned_guest_transport(
             context.scenario,
             scenario_path,
-            metadata,
+            host=context.lifecycle.host,
             utm=context.lifecycle.utm,
             vagrant=context.lifecycle.vagrant,
+            template_manager=context.lifecycle.template_manager,
         )
         result = context.primitive_engine.provision(
             context.scenario,
@@ -924,9 +925,10 @@ def validate_runtime(
         transport = owned_guest_transport(
             context.scenario,
             scenario_path,
-            metadata,
+            host=context.lifecycle.host,
             utm=context.lifecycle.utm,
             vagrant=context.lifecycle.vagrant,
+            template_manager=context.lifecycle.template_manager,
         )
         result = context.primitive_engine.validate(
             context.scenario,

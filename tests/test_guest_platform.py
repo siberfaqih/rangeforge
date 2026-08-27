@@ -73,7 +73,7 @@ class TestGuestCapabilities:
         assert caps.runtimes == (RuntimeType.VM,)
         assert caps.architectures == (Architecture.ARM64, Architecture.AMD64)
         assert caps.roles == (GuestRole.STANDALONE,)
-        assert caps.execution_languages == ()
+        assert caps.execution_languages == (ExecutionLanguage.POWERSHELL,)
         assert caps.cross_architecture_emulation is False
 
     def test_windows_docker_stays_denied(self) -> None:
@@ -85,10 +85,11 @@ class TestGuestCapabilities:
         assert GuestRole.MEMBER_SERVER not in caps.roles
         assert GuestRole.DOMAIN_CONTROLLER not in caps.roles
 
-    def test_windows_execution_languages_stay_denied(self) -> None:
+    def test_windows_shell_and_python_stay_denied(self) -> None:
+        """Only built-in PowerShell over UTM/QGA is declared for Windows."""
         caps = guest_capabilities(GuestPlatform.WINDOWS)
-        for language in ExecutionLanguage:
-            assert language not in caps.execution_languages
+        assert ExecutionLanguage.SHELL not in caps.execution_languages
+        assert ExecutionLanguage.PYTHON not in caps.execution_languages
 
     def test_windows_capability_metadata_is_immutable(self) -> None:
         caps = guest_capabilities(GuestPlatform.WINDOWS)
@@ -284,11 +285,40 @@ class TestCheckGuestCompatibilityWindows:
         assert result.platform is GuestPlatform.WINDOWS
         assert result.errors == ()
 
-    def test_windows_vm_amd64_native_on_vagrant_host_is_compatible(self) -> None:
+    def test_windows_vm_on_vagrant_backend_is_denied(self) -> None:
+        """Planning-time denial: Windows management is UTM/QGA-only."""
         for host_os in (HostOS.LINUX, HostOS.WINDOWS):
             result = check_guest_compatibility(
                 platform="windows",
                 family="windows",
+                runtime=RuntimeType.VM,
+                backend=VMBackend.VAGRANT,
+                architecture=Architecture.AMD64,
+                host=_host(os=host_os, architecture=Architecture.AMD64),
+            )
+            assert not result.compatible
+            assert any(
+                "Windows Vagrant management is unsupported" in error
+                for error in result.errors
+            )
+
+    def test_windows_vm_utm_is_unaffected_by_the_vagrant_denial(self) -> None:
+        result = check_guest_compatibility(
+            platform="windows",
+            family="windows",
+            runtime=RuntimeType.VM,
+            backend=VMBackend.UTM,
+            architecture=Architecture.ARM64,
+            host=_host(os=HostOS.DARWIN, architecture=Architecture.ARM64),
+        )
+        assert result.compatible
+        assert result.errors == ()
+
+    def test_linux_vm_vagrant_is_unaffected_by_the_windows_denial(self) -> None:
+        for host_os in (HostOS.LINUX, HostOS.WINDOWS):
+            result = check_guest_compatibility(
+                platform="linux",
+                family="linux",
                 runtime=RuntimeType.VM,
                 backend=VMBackend.VAGRANT,
                 architecture=Architecture.AMD64,

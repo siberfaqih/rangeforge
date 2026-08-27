@@ -10,6 +10,7 @@ from pathlib import Path
 from rangeforge.artifacts.manager import ArtifactManager
 from rangeforge.host.models import Architecture
 from rangeforge.models import Scenario
+from rangeforge.runtime.guest import ExecutionLanguage
 from rangeforge.runtime.metadata import RuntimeMetadataStore, scenario_vm_name
 from rangeforge.runtime.models import (
     ManagementState,
@@ -157,6 +158,7 @@ class RuntimePrimitiveEngine:
         runtime_plan: RuntimePlan,
         transport: GuestTransport,
     ) -> RuntimeValidationResult:
+        self._require_shell_transport(transport)
         plan = self.compile_plan(scenario, runtime_plan)
         configuration = self.deriver.derive(scenario)
         metadata_store = RuntimeMetadataStore(scenario_path)
@@ -252,6 +254,7 @@ class RuntimePrimitiveEngine:
         scenario_path: Path,
         transport: GuestTransport,
     ) -> RuntimeValidationResult:
+        self._require_shell_transport(transport)
         metadata_store = RuntimeMetadataStore(scenario_path)
         metadata = metadata_store.load()
         if metadata is None:
@@ -354,6 +357,28 @@ class RuntimePrimitiveEngine:
         )
         metadata_store.save(updated)
         return validation
+
+    @staticmethod
+    def _require_shell_transport(transport: GuestTransport) -> None:
+        """Reject non-shell transports before any guest command is issued.
+
+        Runtime primitive manifests are ``.sh`` shell implementations for
+        Linux guests; a PowerShell transport must never execute them. The
+        declared execution language is mandatory — a transport that does not
+        declare it is rejected by default (default-deny), never assumed
+        shell-capable.
+        """
+        language = getattr(transport, "language", None)
+        if not isinstance(language, ExecutionLanguage):
+            raise ProvisioningError(
+                "Runtime primitives require an explicitly declared Linux shell "
+                "management transport; got no declared execution language."
+            )
+        if language is not ExecutionLanguage.SHELL:
+            raise ProvisioningError(
+                "Runtime primitives require the Linux shell management transport; "
+                f"got the '{language.value}' execution language."
+            )
 
     def _require_owned_running_target(
         self,
