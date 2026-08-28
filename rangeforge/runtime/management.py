@@ -249,10 +249,26 @@ def validate_management_target(
     if metadata.backend is VMBackend.UTM:
         if utm.executable is None:
             raise ManagementTransportError("Owned UTM scenario VM is unavailable.")
-        if not utm.vm_exists(metadata.vm.name):
-            raise ManagementTransportError("Owned UTM scenario VM is missing.")
-        if utm.vm_state(metadata.vm.name) is not VMState.RUNNING:
-            raise ManagementTransportError("Owned UTM scenario VM is not running.")
+        resource_id = metadata.vm.resource_id
+        if resource_id is None:
+            # Legacy (pre-backend-aware) metadata: preserve the historical
+            # name-based existence check. It can never represent Windows.
+            if not utm.vm_exists(metadata.vm.name):
+                raise ManagementTransportError("Owned UTM scenario VM is missing.")
+            if utm.vm_state(metadata.vm.name) is not VMState.RUNNING:
+                raise ManagementTransportError("Owned UTM scenario VM is not running.")
+        else:
+            record = utm.find_by_uuid(resource_id)
+            if record is None:
+                raise ManagementTransportError(
+                    "Owned UTM scenario VM is missing from backend inventory."
+                )
+            if record.name != metadata.vm.name:
+                raise ManagementTransportError(
+                    "UTM resource UUID belongs to a different name; ownership conflict."
+                )
+            if record.vm_state is not VMState.RUNNING:
+                raise ManagementTransportError("Owned UTM scenario VM is not running.")
     else:
         if vagrant.executable is None:
             raise ManagementTransportError("Owned Vagrant scenario environment is unavailable.")
@@ -523,6 +539,8 @@ class _WindowsPowerShellTransport:
         *,
         executable: Path,
         vm_name: str,
+        vm_uuid: str | None = None,
+        guard: Callable[[], None] | None = None,
         runner: GuestCommandRunner = run_guest_command,
         file_runner: GuestFileRunner = run_guest_file,
         sleeper: Callable[[float], None] = time.sleep,
@@ -530,6 +548,13 @@ class _WindowsPowerShellTransport:
     ) -> None:
         self.executable = executable
         self.vm_name = vm_name
+        self.vm_uuid = vm_uuid
+        # ``guard`` revalidates that the persisted UUID still resolves to the
+        # expected name immediately before every name-addressed QGA call. It
+        # is injected by the ownership-gated factory; when None (direct unit
+        # tests), name-addressed calls rely on the constructor-time ownership
+        # validation.
+        self.guard = guard
         self.runner = runner
         self.file_runner = file_runner
         self.sleeper = sleeper
@@ -546,6 +571,18 @@ class _WindowsPowerShellTransport:
         # Set once the one-shot rf-* root sweep has executed successfully
         # after bootstrap readiness (recovers previously damaged clones).
         self._swept = False
+
+    def _revalidate_identity(self) -> None:
+        """Revalidate UUID+name agreement before a name-addressed QGA call.
+
+        utmctl addresses VMs by name while the UTM UUID is the backend-native
+        identity, so a foreign VM that rebinds to the persisted name between
+        transport construction and a QGA call must never receive the
+        operation. The guard runs the backend inventory lookup immediately
+        before every runner invocation and fails closed on any disagreement.
+        """
+        if self.guard is not None:
+            self.guard()
 
     @property
     def guest_root(self) -> str:
@@ -593,6 +630,7 @@ class _WindowsPowerShellTransport:
         when the transfer did not land. Callers must fail closed on False and
         never launch the target script or claim staging success.
         """
+        self._revalidate_identity()
         pushed = self.file_runner(self._push_argv(guest_path), content, self._remaining(deadline))
         return _semantic_success(pushed), pushed
 
@@ -683,6 +721,7 @@ class _WindowsPowerShellTransport:
         self, guest_path: str, deadline: float
     ) -> tuple[_GuestFileState, CommandResult]:
         """Pull a guest file and classify the transfer semantically."""
+        self._revalidate_identity()
         result = self.runner(self._pull_argv(guest_path), "", self._remaining(deadline))
         return _classify_guest_pull(result), result
 
@@ -845,6 +884,7 @@ class _WindowsPowerShellTransport:
         guest_path = self._concrete_path(guest_path)
         rejected = 0
         while self._remaining(deadline) > 0:
+            self._revalidate_identity()
             result = self.runner(
                 self._exec_argv(guest_path), "", self._remaining(deadline)
             )
@@ -1436,7 +1476,38 @@ def _owned_management_transport(
         )
     if utm.executable is None:  # pragma: no cover - validated above
         raise ManagementTransportError("Owned UTM scenario VM is unavailable.")
-    return _WindowsPowerShellTransport(executable=utm.executable, vm_name=metadata.vm.name)
+    resource_id = metadata.vm.resource_id
+    expected_name = metadata.vm.name
+
+    def _qga_guard() -> None:
+        """Revalidate UUID+name immediately before each name-addressed QGA call.
+
+        utmctl addresses VMs by name; a foreign VM that rebinds to the
+        expected name between transport construction and a QGA operation
+        must never receive the operation. The guard runs the backend
+        inventory lookup before every runner invocation and fails closed
+        on any disagreement.
+        """
+        if resource_id is None:
+            return
+        record = utm.find_by_uuid(resource_id)
+        if record is None:
+            raise ManagementTransportError(
+                "Owned UTM scenario VM is missing from backend inventory; "
+                "QGA operation refused."
+            )
+        if record.name != expected_name:
+            raise ManagementTransportError(
+                "UTM resource UUID belongs to a different name; "
+                "ownership conflict — QGA operation refused."
+            )
+
+    return _WindowsPowerShellTransport(
+        executable=utm.executable,
+        vm_name=metadata.vm.name,
+        vm_uuid=metadata.vm.resource_id,
+        guard=_qga_guard,
+    )
 
 
 def owned_guest_transport(
@@ -1557,6 +1628,7 @@ def _run_readiness_probe(
     *,
     expected_architecture: Architecture,
     clock: Callable[[], float] = time.monotonic,
+    total_budget: float = _PROBE_TOTAL_BUDGET,
 ) -> ManagementProbeResult:
     """Run the fixed internal Windows management readiness probe.
 
@@ -1569,12 +1641,13 @@ def _run_readiness_probe(
     service, and it never targets a shared base template (transports can only
     be constructed for owned scenario clones).
 
-    All operations share one monotonic total budget of ``_PROBE_TOTAL_BUDGET``
+    All operations share one monotonic total budget (``total_budget``) of
     seconds: every operation receives exactly the remaining budget, and once
     it is exhausted no further operations are issued — each remaining check
-    is recorded as failed in deterministic order.
+    is recorded as failed in deterministic order. Callers that already hold a
+    lifecycle deadline pass the remaining budget so the probe stays inside it.
     """
-    deadline = clock() + _PROBE_TOTAL_BUDGET
+    deadline = clock() + max(0.0, total_budget)
     checks: list[ManagementCheck] = []
 
     def record(name: str, passed: bool) -> None:
@@ -1703,6 +1776,7 @@ def probe_windows_management(
     template_manager: TemplateManager,
     expected_architecture: Architecture,
     clock: Callable[[], float] = time.monotonic,
+    total_budget: float | None = None,
 ) -> ManagementProbeResult:
     """Public readiness-probe entry point for an owned Windows clone.
 
@@ -1710,6 +1784,10 @@ def probe_windows_management(
     trusted-template validation, then runs the fixed internal probe under
     one bounded total budget. There is no public path to an arbitrary
     guest-command executor.
+
+    When ``total_budget`` is provided, the probe uses that as the total
+    budget instead of the default ``_PROBE_TOTAL_BUDGET``. This allows
+    lifecycle callers to pass a remaining operation deadline.
     """
     channel = _owned_management_transport(
         scenario,
@@ -1721,5 +1799,8 @@ def probe_windows_management(
         template_manager=template_manager,
     )
     return _run_readiness_probe(
-        channel, expected_architecture=expected_architecture, clock=clock
+        channel,
+        expected_architecture=expected_architecture,
+        clock=clock,
+        total_budget=total_budget if total_budget is not None else _PROBE_TOTAL_BUDGET,
     )

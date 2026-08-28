@@ -24,7 +24,13 @@ from rangeforge.images.manager import ImageManager, ImageManagerError
 from rangeforge.images.registry import ImageRegistry, ImageRegistryError
 from rangeforge.images.resolver import ImageResolver
 from rangeforge.images.templates import TemplateManager
-from rangeforge.models import AccessState, DifficultyLevel, Scenario
+from rangeforge.models import (
+    AccessState,
+    DifficultyLevel,
+    GuestRequirement,
+    Scenario,
+    TrainingProfile,
+)
 from rangeforge.primitives.loader import PrimitiveLoader, PrimitiveLoadError
 from rangeforge.profiles.loader import ProfileLoader, ProfileLoadError
 from rangeforge.runtime.backends.base import BackendOperationError
@@ -49,7 +55,7 @@ from rangeforge.runtime_primitives.loader import (
 from rangeforge.runtime_primitives.models import RuntimeValidationResult
 from rangeforge.runtime_primitives.registry import RuntimeImplementationError
 from rangeforge.serialization.yaml import ScenarioYamlSerializer
-from rangeforge.validation.scenario import ScenarioValidator
+from rangeforge.validation.scenario import ScenarioValidator, validate_lifecycle_structure
 
 app = typer.Typer(help="Deterministic cyber-range scenario generation.", no_args_is_help=True)
 images_app = typer.Typer(help="Inspect and manage trusted local image artifacts.")
@@ -110,19 +116,68 @@ class _LifecycleContext:
     primitive_engine: RuntimePrimitiveEngine
 
 
+# Lifecycle-only planner requirement view. ``RuntimePlanner.plan()`` requires a
+# ``GuestRequirement`` for the scenario platform; the production profile
+# intentionally declares only Linux. Standalone lifecycle commands use a
+# command-scoped profile view that supplies the reviewed Windows 11
+# requirement while leaving ``allowed_platforms``, techniques, and categories
+# untouched so curriculum eligibility stays default-deny.
+_WINDOWS_LIFECYCLE_REQUIREMENT = GuestRequirement(
+    family="windows",
+    distribution="windows",
+    version="11",
+    default_runtime="vm",
+)
+
+
+def _lifecycle_profile_view(profile: TrainingProfile) -> TrainingProfile:
+    """Return a profile copy with the lifecycle-only Windows requirement.
+
+    The copy is used only by standalone lifecycle commands (runtime plan,
+    build, up, status, stop, destroy). It never changes the production
+    profile's allowed platforms or technique policy.
+    """
+    runtime_defaults = dict(profile.runtime_defaults)
+    runtime_defaults.setdefault("windows", _WINDOWS_LIFECYCLE_REQUIREMENT)
+    return profile.model_copy(update={"runtime_defaults": runtime_defaults})
+
+
+def _lifecycle_validation(scenario: Scenario, profile: TrainingProfile) -> None:
+    """Structural validation for standalone lifecycle commands.
+
+    Narrower than ``ScenarioValidator``: validates scenario identity and
+    runtime-relevant structure without curriculum, primitive, or graph
+    solvability policy. Never used by generate/provision/validate.
+    """
+    issues = validate_lifecycle_structure(scenario, profile)
+    if issues:
+        raise ValueError("Scenario lifecycle validation failed: " + "; ".join(issues))
+
+
 def _runtime_context(
     scenario_path: Path,
     runtime: RuntimeType | None,
     config_path: Path | None,
+    *,
+    lifecycle_only: bool = False,
 ) -> _RuntimeContext:
     loaded_config = _config(config_path)
     scenario = ScenarioYamlSerializer().load(scenario_path)
     profile = ProfileLoader().load(scenario.scenario.profile)
     primitive_registry = PrimitiveLoader().load()
-    validation = ScenarioValidator(profile, primitive_registry).validate(scenario)
-    if not validation.valid:
-        details = "; ".join((*validation.profile_violations, *validation.errors))
-        raise ValueError(f"Scenario static validation failed: {details}")
+    # F-8: the lifecycle-scoped structural validation and lifecycle-only
+    # planner requirement view apply ONLY to standalone Windows lifecycle
+    # scenarios. Linux lifecycle commands keep the full ScenarioValidator and
+    # the existing deterministic primitive-plan preflight, so a Linux input
+    # that fails full validation is still rejected.
+    if lifecycle_only and scenario.scenario.platform == "windows":
+        _lifecycle_validation(scenario, profile)
+        profile = _lifecycle_profile_view(profile)
+    else:
+        validation = ScenarioValidator(profile, primitive_registry).validate(scenario)
+        if not validation.valid:
+            details = "; ".join((*validation.profile_violations, *validation.errors))
+            raise ValueError(f"Scenario static validation failed: {details}")
     image_registry = ImageRegistry.load()
     manager = ImageManager(image_registry, ImageCache(loaded_config.images.cache_dir))
     artifact_manager = _artifact_manager(loaded_config)
@@ -165,15 +220,23 @@ def _runtime_context(
 def _lifecycle_only_context(
     scenario_path: Path,
     config_path: Path | None,
+    *,
+    lifecycle_only: bool = False,
 ) -> _LifecycleContext:
     loaded_config = _config(config_path)
     scenario = ScenarioYamlSerializer().load(scenario_path)
     profile = ProfileLoader().load(scenario.scenario.profile)
     primitive_registry = PrimitiveLoader().load()
-    validation = ScenarioValidator(profile, primitive_registry).validate(scenario)
-    if not validation.valid:
-        details = "; ".join((*validation.profile_violations, *validation.errors))
-        raise ValueError(f"Scenario static validation failed: {details}")
+    # F-8: lifecycle-scoped structural validation applies only to standalone
+    # Windows lifecycle commands (status/stop/destroy). Linux commands keep
+    # the full ScenarioValidator.
+    if lifecycle_only and scenario.scenario.platform == "windows":
+        _lifecycle_validation(scenario, profile)
+    else:
+        validation = ScenarioValidator(profile, primitive_registry).validate(scenario)
+        if not validation.valid:
+            details = "; ".join((*validation.profile_violations, *validation.errors))
+            raise ValueError(f"Scenario static validation failed: {details}")
     manager = ImageManager(ImageRegistry.load(), ImageCache(loaded_config.images.cache_dir))
     artifact_manager = _artifact_manager(loaded_config)
     cves = _cves(artifact_manager.registry)
@@ -736,7 +799,7 @@ def runtime_plan(
 ) -> None:
     """Resolve a deterministic deployment plan without deploying anything."""
     try:
-        plan = _runtime_context(scenario_path, runtime, config).plan
+        plan = _runtime_context(scenario_path, runtime, config, lifecycle_only=True).plan
     except (
         ConfigError,
         ArtifactRegistryError,
@@ -752,7 +815,7 @@ def runtime_plan(
     _render_runtime_plan(plan)
 
 
-def _render_lifecycle(result: LifecycleResult) -> None:
+def _render_lifecycle(result: LifecycleResult, *, ownership_verified: bool | None = None) -> None:
     console.print(f"[bold]{result.message}[/bold]")
     metadata = result.metadata
     if metadata is None:
@@ -765,10 +828,20 @@ def _render_lifecycle(result: LifecycleResult) -> None:
     table.add_row("Backend", metadata.backend.value.upper())
     table.add_row("VM", metadata.vm.name)
     table.add_row("State", metadata.vm.state.value.upper())
-    table.add_row("Template", metadata.template.name)
+    guest_os = " ".join(
+        part
+        for part in (metadata.guest.product, metadata.guest.version)
+        if part is not None
+    )
+    table.add_row("Guest OS", guest_os or "unavailable")
     table.add_row("Guest architecture", metadata.guest.architecture.value)
+    table.add_row("Template", metadata.template.name)
     table.add_row("IP", metadata.guest.ip or "unavailable")
     table.add_row("Management", metadata.guest.management.value.upper())
+    if ownership_verified is not None:
+        table.add_row(
+            "Ownership", "VERIFIED" if ownership_verified else "UNVERIFIED"
+        )
     table.add_row("Provisioning", metadata.provisioning.state.value.upper())
     table.add_row("Validation", metadata.validation.state.value.upper())
     console.print(table)
@@ -782,12 +855,18 @@ def _lifecycle_command(
 ) -> None:
     try:
         if operation in {"build", "up"}:
-            context = _runtime_context(scenario_path, runtime, config)
-            context.primitive_engine.compile_plan(context.scenario, context.plan)
+            context = _runtime_context(scenario_path, runtime, config, lifecycle_only=True)
+            # Standalone lifecycle-only Windows scenarios have no Linux
+            # runtime primitive plan; Linux scenarios keep the existing
+            # deterministic preflight compile.
+            if context.scenario.scenario.platform != "windows":
+                context.primitive_engine.compile_plan(context.scenario, context.plan)
             method = getattr(context.lifecycle, operation)
             result = method(context.scenario, scenario_path, context.plan)
         else:
-            context_without_plan = _lifecycle_only_context(scenario_path, config)
+            context_without_plan = _lifecycle_only_context(
+                scenario_path, config, lifecycle_only=True
+            )
             method = getattr(context_without_plan.lifecycle, operation)
             result = method(context_without_plan.scenario, scenario_path)
     except (
@@ -798,6 +877,10 @@ def _lifecycle_command(
         CVERegistryError,
         ImageRegistryError,
         ImageManagerError,
+        # Backend identity/inventory conflicts (duplicate resources, backend
+        # inventory failures) must render as controlled lifecycle command
+        # failures, never as uncaught exceptions.
+        BackendOperationError,
         LifecycleError,
         RuntimeMetadataError,
         RuntimePrimitiveLoadError,
@@ -810,7 +893,11 @@ def _lifecycle_command(
     ) as exc:
         console.print(f"[red]{operation.capitalize()} failed: {exc}[/red]")
         raise typer.Exit(code=1) from exc
-    _render_lifecycle(result)
+    # F-7: the CLI renders ownership strictly from the typed evidence produced
+    # by the lifecycle reconciliation. A foreign same-name/backend conflict is
+    # reported as UNVERIFIED; VERIFIED is never inferred from message parsing
+    # or from validating metadata alone.
+    _render_lifecycle(result, ownership_verified=result.ownership_verified)
 
 
 def _render_runtime_validation(result: RuntimeValidationResult) -> None:
@@ -891,6 +978,7 @@ def provision(
         CVERegistryError,
         ImageRegistryError,
         ImageManagerError,
+        BackendOperationError,
         LifecycleError,
         RuntimeMetadataError,
         RuntimePrimitiveLoadError,
@@ -943,6 +1031,7 @@ def validate_runtime(
         CVERegistryError,
         ImageRegistryError,
         ImageManagerError,
+        BackendOperationError,
         LifecycleError,
         RuntimeMetadataError,
         RuntimePrimitiveLoadError,
@@ -969,6 +1058,15 @@ def status(
 ) -> None:
     """Refresh and display scenario-owned runtime state."""
     _lifecycle_command("status", scenario_path, None, config)
+
+
+@app.command()
+def stop(
+    scenario_path: Annotated[Path, typer.Argument(help="Generated scenario.yaml path.")],
+    config: Annotated[Path | None, typer.Option(help="Optional configuration file.")] = None,
+) -> None:
+    """Stop the owned scenario VM without destroying it."""
+    _lifecycle_command("stop", scenario_path, None, config)
 
 
 @app.command()

@@ -10,6 +10,7 @@ import itertools
 import re
 from collections.abc import Callable
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -17,8 +18,10 @@ from rangeforge.host.models import Architecture, HostInfo, HostOS
 from rangeforge.images.models import BaseTemplate, TemplateState
 from rangeforge.models import Scenario
 from rangeforge.runtime.backends.base import CommandResult
+from rangeforge.runtime.backends.utm import UTMInventoryRecord
 from rangeforge.runtime.guest import ExecutionLanguage, GuestPlatform
 from rangeforge.runtime.management import (
+    ManagementProbeResult,
     ManagementTransportError,
     _owned_management_transport,
     _run_readiness_probe,
@@ -32,6 +35,7 @@ from rangeforge.runtime.management import (
 )
 from rangeforge.runtime.metadata import (
     RuntimeMetadataStore,
+    ownership_fingerprint,
     scenario_managed_id,
     scenario_vm_name,
 )
@@ -506,6 +510,11 @@ class RecordingUTM:
         self.executable = UTMCTL
         self.vms = vms
         self.calls: list[str] = []
+        # Deterministic UUID per VM name so UUID lookups work without caller
+        # plumbing. Tests that need a specific UUID pass it explicitly.
+        self.uuid_by_name: dict[str, str] = {
+            name: f"uuid-{name}" for name in vms
+        }
 
     def vm_exists(self, name: str) -> bool:
         self.calls.append("vm_exists")
@@ -514,6 +523,27 @@ class RecordingUTM:
     def vm_state(self, name: str) -> VMState:
         self.calls.append("vm_state")
         return self.vms.get(name, VMState.NOT_BUILT)
+
+    def find_by_name(self, name: str) -> UTMInventoryRecord | None:
+        self.calls.append("find_by_name")
+        if name not in self.vms:
+            return None
+        return UTMInventoryRecord(
+            uuid=self.uuid_by_name.get(name, f"uuid-{name}"),
+            name=name,
+            state=self.vms[name].value,
+        )
+
+    def find_by_uuid(self, uuid: str) -> UTMInventoryRecord | None:
+        self.calls.append("find_by_uuid")
+        for name, candidate in self.uuid_by_name.items():
+            if candidate == uuid:
+                return UTMInventoryRecord(
+                    uuid=uuid,
+                    name=name,
+                    state=self.vms[name].value,
+                )
+        return None
 
 
 class RecordingVagrant:
@@ -580,8 +610,13 @@ def _metadata(
     state: VMState = VMState.RUNNING,
     management: ManagementState = ManagementState.READY,
     vm_name: str | None = None,
+    resource_id: str | None = None,
+    metadata_version: int = 4,
 ) -> RuntimeMetadata:
     name = vm_name or scenario_vm_name(scenario)
+    if resource_id is None:
+        # Derived from the name so the synthetic RecordingUTM UUIDs agree.
+        resource_id = f"uuid-{name}"
     guest = RuntimeGuestState(
         architecture=architecture,
         ip="192.168.64.9",
@@ -590,14 +625,23 @@ def _metadata(
         management_transport=kind,
         execution_language=language,
     )
-    return RuntimeMetadata(
+    metadata = RuntimeMetadata(
         scenario_id=scenario.scenario.id,
         profile=scenario.scenario.profile,
         runtime=RuntimeType.VM,
         backend=backend,
-        vm=VMIdentity(name=name, managed_id=scenario_managed_id(scenario), state=state),
+        vm=VMIdentity(
+            name=name,
+            managed_id=scenario_managed_id(scenario),
+            state=state,
+            resource_id=resource_id,
+        ),
         template=_template_reference(),
         guest=guest,
+        metadata_version=metadata_version,
+    )
+    return metadata.model_copy(
+        update={"ownership_fingerprint": ownership_fingerprint(metadata)}
     )
 
 
@@ -1768,6 +1812,7 @@ class TestOwnershipGate:
             language=None,
             kind=None,
             management=ManagementState.READY,
+            metadata_version=2,
         )
         _persisted(scenario_path, legacy)
         utm = RecordingUTM({legacy.vm.name: VMState.RUNNING})
@@ -1786,6 +1831,7 @@ class TestOwnershipGate:
             language=None,
             kind=None,
             management=ManagementState.READY,
+            metadata_version=2,
         )
         _persisted(scenario_path, legacy)
         utm = RecordingUTM({legacy.vm.name: VMState.RUNNING})
@@ -1906,7 +1952,7 @@ class TestOwnershipGate:
         utm = RecordingUTM({metadata.vm.name: VMState.STOPPED})
         with pytest.raises(ManagementTransportError, match="not running"):
             self._validated_transport(windows_scenario, scenario_path, utm=utm)
-        assert utm.calls == ["vm_exists", "vm_state"]
+        assert utm.calls == ["find_by_uuid"]
 
     def test_missing_vm_resource_rejected(
         self, windows_scenario: Scenario, tmp_path: Path
@@ -1916,7 +1962,7 @@ class TestOwnershipGate:
         utm = RecordingUTM({})
         with pytest.raises(ManagementTransportError, match="missing"):
             self._validated_transport(windows_scenario, scenario_path, utm=utm)
-        assert utm.calls == ["vm_exists"]
+        assert utm.calls == ["find_by_uuid"]
 
     def test_template_registry_identity_mismatch_rejected_before_runner_calls(
         self, windows_scenario: Scenario, tmp_path: Path
@@ -2237,6 +2283,61 @@ class TestProbeBudget:
             transport, expected_architecture=Architecture.ARM64
         )
         assert probe.ok is True
+
+    def test_probe_accepts_explicit_total_budget(self) -> None:
+        transport = self._RecordingTransport()
+        clock = self._SteppingClock(7.0)
+        probe = _run_readiness_probe(
+            transport,
+            expected_architecture=Architecture.ARM64,
+            clock=clock,
+            total_budget=45.0,
+        )
+        assert probe.ok is True
+        assert transport.timeouts
+        assert all(t <= 45.0 for t in transport.timeouts)
+        # The default total budget is preserved for direct callers.
+        transport2 = self._RecordingTransport()
+        _run_readiness_probe(transport2, expected_architecture=Architecture.ARM64)
+        assert all(t <= 300.0 for t in transport2.timeouts)
+
+    def test_probe_windows_management_forwards_explicit_budget(
+        self, scenario: Scenario, tmp_path: Path
+    ) -> None:
+        import rangeforge.runtime.management as management_module
+
+        observed: dict[str, object] = {}
+
+        def fake_transport_factory(*args: object, **kwargs: object) -> object:
+            return self._RecordingTransport()
+
+        def fake_probe(channel: object, **kwargs: object) -> ManagementProbeResult:
+            observed["total_budget"] = kwargs.get("total_budget")
+            return ManagementProbeResult(ok=True, checks=())
+
+        with (
+            patch.object(
+                management_module,
+                "_owned_management_transport",
+                side_effect=fake_transport_factory,
+            ),
+            patch.object(
+                management_module,
+                "_run_readiness_probe",
+                side_effect=fake_probe,
+            ),
+        ):
+            management_module.probe_windows_management(
+                scenario,
+                tmp_path,
+                host=HOST,
+                utm=RecordingUTM({}),
+                vagrant=RecordingVagrant(False),
+                template_manager=StubTemplates(None),
+                expected_architecture=Architecture.ARM64,
+                total_budget=33.0,
+            )
+        assert observed["total_budget"] == 33.0
 
 
 class TestAbsoluteDeadlineUnderLockContention:

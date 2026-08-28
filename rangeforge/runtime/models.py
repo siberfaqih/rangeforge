@@ -75,6 +75,8 @@ class VMState(StrEnum):
     STOPPED = "stopped"
     STARTING = "starting"
     RUNNING = "running"
+    STOPPING = "stopping"
+    MISSING = "missing"
     ERROR = "error"
     UNKNOWN = "unknown"
 
@@ -165,6 +167,20 @@ class VMIdentity(StrictModel):
     name: str
     managed_id: str
     state: VMState
+    # Backend-native resource identity. For UTM this is the VM UUID and for
+    # Vagrant it is the stable scenario-environment fingerprint, both captured
+    # at build time. ``None`` when the metadata predates backend-aware builds;
+    # such legacy metadata is never sufficient for Windows mutation. The
+    # environment fingerprint must never be replaced by a provider machine ID:
+    # it is the stable identity that survives a ``vagrant destroy --force``
+    # leaving the Vagrantfile behind.
+    resource_id: str | None = None
+    # Optional provider-side machine ID (for example the VirtualBox/VMware
+    # machine UUID that Vagrant records in ``.vagrant/machines/<name>/
+    # <provider>/id`` after the first ``up``). ``None`` during build, and
+    # only validated when present; it is additional evidence, never a
+    # replacement for ``resource_id``.
+    provider_id: str | None = None
 
 
 class RuntimeTemplateReference(StrictModel):
@@ -178,12 +194,30 @@ class RuntimeGuestState(StrictModel):
     architecture: Architecture
     ip: str | None = None
     management: ManagementState = ManagementState.NOT_READY
+    # Persisted guest product and version (for example ``windows`` and
+    # ``11``) so status can render the guest OS without consulting mutable
+    # guest state. ``None`` for legacy metadata that predates them.
+    product: str | None = None
+    version: str | None = None
     # Persisted guest platform and management identity. ``None`` means the
     # metadata predates platform-aware builds; legacy metadata is only ever
     # read back as Linux-capable and never as Windows-capable.
     platform: GuestPlatform | None = None
     management_transport: ManagementTransportKind | None = None
     execution_language: ExecutionLanguage | None = None
+
+
+class LifecycleFailure(StrictModel):
+    """Bounded, non-secret lifecycle failure classification.
+
+    ``classification`` is a stable machine-readable token (for example
+    ``management_unavailable`` or ``start_timeout``); ``message`` is a
+    short, bounded human-readable detail. Credentials, scripts, flags, and
+    secret output must never be persisted here.
+    """
+
+    classification: str
+    message: str = ""
 
 
 class ManagementResult(StrictModel):
@@ -226,10 +260,25 @@ class RuntimeMetadata(StrictModel):
     guest: RuntimeGuestState
     provisioning: ProvisioningStatus = ProvisioningStatus()
     validation: RuntimeValidationStatus = RuntimeValidationStatus()
-    metadata_version: int = 3
+    # Deterministic ownership fingerprint binding schema, managed ID,
+    # backend, backend-native identity, expected name, template identity and
+    # fingerprint, guest platform, and architecture. ``None`` for legacy
+    # metadata that predates fingerprint-aware builds.
+    ownership_fingerprint: str | None = None
+    # Bounded non-secret lifecycle failure record; ``None`` when the last
+    # operation did not fail.
+    failure: LifecycleFailure | None = None
+    metadata_version: int = 4
 
 
 class LifecycleResult(StrictModel):
     changed: bool
     message: str
     metadata: RuntimeMetadata | None = None
+    # Evidence-based ownership confirmation for CLI rendering. ``None`` when
+    # there is no persisted metadata to verify; ``True`` only when persisted
+    # ownership metadata validated AND the backend-native identity agreed with
+    # the persisted identity; ``False`` on any ownership conflict, including a
+    # foreign same-name backend resource. The CLI renders VERIFIED only from
+    # this typed evidence, never from message parsing.
+    ownership_verified: bool | None = None

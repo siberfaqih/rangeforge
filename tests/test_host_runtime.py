@@ -2,17 +2,22 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from rangeforge.host.detector import HostDetector
 from rangeforge.host.models import Architecture, HostInfo, HostOS
 from rangeforge.images.models import VagrantBox
 from rangeforge.models import Primitive
 from rangeforge.primitives.registry import PrimitiveRegistry
-from rangeforge.runtime.backends.base import CommandResult
+from rangeforge.runtime.backends.base import BackendOperationError, CommandResult
 from rangeforge.runtime.backends.docker import DockerBackend
-from rangeforge.runtime.backends.utm import UTMBackend
-from rangeforge.runtime.backends.vagrant import VagrantBackend
-from rangeforge.runtime.models import BackendType, RuntimeType, VMBackend
+from rangeforge.runtime.backends.utm import UTMBackend, parse_utm_state
+from rangeforge.runtime.backends.vagrant import VagrantBackend, map_vagrant_state
+from rangeforge.runtime.models import BackendType, RuntimeType, VMBackend, VMState
 from rangeforge.runtime.resolver import RuntimeResolver
+
+_UUID_A = "11111111-2222-3333-4444-555555555555"
+_UUID_B = "66666666-7777-8888-9999-000000000000"
 
 
 def _host(os: HostOS, architecture: Architecture) -> HostInfo:
@@ -128,6 +133,217 @@ def test_missing_backend_dependency_status() -> None:
     assert "not found" in status.details[0]
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("started", VMState.RUNNING),
+        ("running", VMState.RUNNING),
+        ("stopped", VMState.STOPPED),
+        ("starting", VMState.STARTING),
+        ("stopping", VMState.STOPPING),
+        ("paused", VMState.UNKNOWN),
+        ("suspended", VMState.UNKNOWN),
+        ("", VMState.UNKNOWN),
+    ],
+)
+def test_utm_state_token_mapping(raw: str, expected: VMState) -> None:
+    assert parse_utm_state(raw) is expected
+
+
+@pytest.mark.parametrize(
+    ("row", "expected_uuid", "expected_state", "expected_name"),
+    [
+        pytest.param(
+            f"{_UUID_A} stopped rf-base-image",
+            _UUID_A,
+            VMState.STOPPED,
+            "rf-base-image",
+            id="plain-row",
+        ),
+        pytest.param(
+            f"{_UUID_A} started My VM With Spaces",
+            _UUID_A,
+            VMState.RUNNING,
+            "My VM With Spaces",
+            id="name-with-spaces",
+        ),
+        pytest.param(
+            f"{_UUID_A}\tstarted\tTabbed\tName",
+            _UUID_A,
+            VMState.RUNNING,
+            "Tabbed\tName",
+            id="tab-separated-name-with-tab",
+        ),
+        pytest.param(
+            f"{_UUID_A} starting rf-1337", _UUID_A, VMState.STARTING, "rf-1337",
+            id="starting-state",
+        ),
+        pytest.param(
+            f"{_UUID_A} stopping rf-1337", _UUID_A, VMState.STOPPING, "rf-1337",
+            id="stopping-state",
+        ),
+        pytest.param(
+            f"{_UUID_B} suspended rf-1337", _UUID_B, VMState.UNKNOWN, "rf-1337",
+            id="unknown-state-token",
+        ),
+    ],
+)
+def test_utm_inventory_row_parsing_preserves_names_and_states(
+    row: str, expected_uuid: str, expected_state: VMState, expected_name: str
+) -> None:
+    records = UTMBackend._records_from_listing(row)
+    assert len(records) == 1
+    record = records[0]
+    assert record.uuid == expected_uuid
+    assert record.name == expected_name
+    assert record.vm_state is expected_state
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "UUID Status Name",
+        "uuid status name",
+        "UUID   Status   Name",
+        "UUID: Status: Name",
+        "UUID:Status:Name",
+    ],
+)
+def test_utm_inventory_header_variants_are_skipped(header: str) -> None:
+    listing = (
+        f"{header}\n{_UUID_A} stopped rf-base-image\n"
+        f"{_UUID_B} started rf-1337"
+    )
+    records = UTMBackend._records_from_listing(listing)
+    assert [record.name for record in records] == ["rf-base-image", "rf-1337"]
+
+
+@pytest.mark.parametrize(
+    ("row", "match"),
+    [
+        pytest.param("one-field", "Malformed UTM inventory row", id="one-field"),
+        pytest.param(
+            f"{_UUID_A} stopped", "Malformed UTM inventory row", id="two-fields"
+        ),
+        pytest.param(
+            "not-a-uuid stopped rf-1337",
+            "Invalid UTM inventory UUID",
+            id="invalid-uuid",
+        ),
+        pytest.param(
+            "11111111-2222-3333-4444-55555555555 stopped rf-1337",
+            "Invalid UTM inventory UUID",
+            id="truncated-uuid",
+        ),
+        pytest.param(
+            f"{_UUID_A} stopped", "Malformed UTM inventory row", id="missing-name"
+        ),
+    ],
+)
+def test_utm_inventory_malformed_rows_fail_closed(row: str, match: str) -> None:
+    with pytest.raises(BackendOperationError, match=match):
+        UTMBackend._records_from_listing(row)
+
+
+def test_utm_inventory_blank_lines_are_ignored() -> None:
+    listing = f"\n{_UUID_A} stopped rf-base-image\n\n"
+    records = UTMBackend._records_from_listing(listing)
+    assert [record.name for record in records] == ["rf-base-image"]
+
+
+def test_utm_inventory_command_failure_is_not_empty_inventory(tmp_path: Path) -> None:
+    """A failing ``utmctl list`` raises; it never reads as an empty inventory."""
+    executable = tmp_path / "utmctl"
+    executable.write_text("fixture", encoding="utf-8")
+    backend = UTMBackend(
+        executable,
+        runner=lambda _: CommandResult(
+            returncode=1, stderr="utmctl: unable to connect to the UTM app"
+        ),
+    )
+    with pytest.raises(BackendOperationError, match="unable to connect"):
+        backend.inventory()
+    with pytest.raises(BackendOperationError):
+        backend.find_by_uuid(_UUID_A)
+    with pytest.raises(BackendOperationError):
+        backend.find_by_name("rf-1337")
+    with pytest.raises(BackendOperationError):
+        backend.vm_names()
+
+
+def test_utm_unavailable_backend_inventory_fails_closed() -> None:
+    backend = UTMBackend(None)
+    with pytest.raises(BackendOperationError, match="UTM backend is unavailable"):
+        backend.find_by_name("rf-1337")
+
+
+@pytest.mark.parametrize(
+    ("tokens", "expected"),
+    [
+        (["running"], VMState.RUNNING),
+        (["poweroff"], VMState.STOPPED),
+        (["saved"], VMState.STOPPED),
+        (["aborted"], VMState.STOPPED),
+        (["stopped"], VMState.STOPPED),
+        # The genuine never-created token is startable and cleanable.
+        (["not created"], VMState.STOPPED),
+        (["not_created"], VMState.STOPPED),
+        # Transitional and active-mutation tokens fail closed, never STOPPED.
+        (["preparing"], VMState.UNKNOWN),
+        (["starting"], VMState.UNKNOWN),
+        (["stopping"], VMState.UNKNOWN),
+        (["saving"], VMState.UNKNOWN),
+        (["restoring"], VMState.UNKNOWN),
+        (["deleting"], VMState.UNKNOWN),
+        (["unheard-of"], VMState.UNKNOWN),
+        ([""], VMState.UNKNOWN),
+        (["not created", "running"], VMState.RUNNING),
+    ],
+)
+def test_vagrant_state_token_mapping(tokens: list[str], expected: VMState) -> None:
+    assert map_vagrant_state(tokens) is expected
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        pytest.param(
+            "1626000000,default,default,virtualbox,state,not created",
+            VMState.STOPPED,
+            id="not-created",
+        ),
+        pytest.param(
+            "1626000000,default,default,virtualbox,state,poweroff",
+            VMState.STOPPED,
+            id="poweroff",
+        ),
+        pytest.param(
+            "1626000000,default,default,virtualbox,state,running",
+            VMState.RUNNING,
+            id="running",
+        ),
+        pytest.param(
+            "1626000000,default,default,virtualbox,state,preparing",
+            VMState.UNKNOWN,
+            id="preparing",
+        ),
+    ],
+)
+def test_vagrant_vm_state_parses_machine_readable_tokens(
+    tmp_path: Path, stdout: str, expected: VMState
+) -> None:
+    executable = tmp_path / "vagrant"
+    executable.write_text("fixture", encoding="utf-8")
+    environment = tmp_path / "environment"
+    environment.mkdir()
+    (environment / "Vagrantfile").write_text("# fixture\n", encoding="utf-8")
+    backend = VagrantBackend(
+        executable,
+        runner=lambda _: CommandResult(returncode=0, stdout=stdout),
+    )
+    assert backend.vm_state(environment) is expected
+
+
 def test_utm_backend_lifecycle_command_construction(tmp_path: Path) -> None:
     executable = tmp_path / "utmctl"
     executable.write_text("fixture", encoding="utf-8")
@@ -138,7 +354,11 @@ def test_utm_backend_lifecycle_command_construction(tmp_path: Path) -> None:
         if command[1] == "list":
             return CommandResult(
                 returncode=0,
-                stdout="UUID Status Name\nabc stopped rf-base-image\ndef started rf-1337",
+                stdout=(
+                    "UUID Status Name\n"
+                    "11111111-2222-3333-4444-555555555555 stopped rf-base-image\n"
+                    "66666666-7777-8888-9999-000000000000 started rf-1337"
+                ),
             )
         if command[1] == "status":
             return CommandResult(returncode=0, stdout="started")

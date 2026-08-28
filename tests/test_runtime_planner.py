@@ -664,3 +664,41 @@ def test_runtime_plan_missing_backend_keeps_compatibility_and_image(
     assert plan.guest is not None
     assert plan.guest.image_id == "windows-11-arm64"
     assert plan.next_action == "Install or start the required utm backend."
+
+
+def test_lifecycle_only_profile_view_preserves_planner_determinism(
+    profile: TrainingProfile,
+    registry: PrimitiveRegistry,
+    tmp_path: Path,
+) -> None:
+    """The lifecycle-only Windows requirement view leaves the planner
+    deterministic and does not widen profile policy."""
+    lifecycle_view = profile.model_copy(
+        update={
+            "runtime_defaults": {
+                **profile.runtime_defaults,
+                "windows": GuestRequirement(
+                    family="windows",
+                    distribution="windows",
+                    version="11",
+                    default_runtime="vm",
+                ),
+            }
+        }
+    )
+    # allowed_platforms and techniques remain unchanged (Windows stays denied
+    # for curriculum eligibility; only planning can see the requirement).
+    assert lifecycle_view.allowed_platforms == profile.allowed_platforms
+    assert lifecycle_view.allowed_techniques == profile.allowed_techniques
+    planner = _planner(lifecycle_view, registry, tmp_path)
+    windows_scenario = _windows_scenario(architecture="arm64")
+    first = planner.plan(windows_scenario, requested_runtime=RuntimeType.VM, host=_host())
+    second = planner.plan(windows_scenario, requested_runtime=RuntimeType.VM, host=_host())
+    assert first == second
+    assert first.compatible
+    assert first.runtime.backend is VMBackend.UTM
+    assert first.guest is not None
+    assert first.guest.image_id == "windows-11-arm64"
+    assert hashlib.sha256(first.model_dump_json().encode()).hexdigest() == hashlib.sha256(
+        second.model_dump_json().encode()
+    ).hexdigest()

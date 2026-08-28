@@ -39,6 +39,7 @@ from rangeforge.primitives.registry import PrimitiveRegistry
 from rangeforge.runtime.backends.base import CommandResult
 from rangeforge.runtime.metadata import (
     RuntimeMetadataStore,
+    ownership_fingerprint,
     scenario_managed_id,
     scenario_vm_name,
 )
@@ -159,28 +160,34 @@ def _plan(scenario: Scenario) -> RuntimePlan:
 
 
 def _deployed(scenario: Scenario, scenario_path: Path) -> None:
+    vm_name = scenario_vm_name(scenario)
+    metadata = RuntimeMetadata(
+        scenario_id=scenario.scenario.id,
+        profile=scenario.scenario.profile,
+        runtime=RuntimeType.VM,
+        backend=VMBackend.UTM,
+        vm=VMIdentity(
+            name=vm_name,
+            managed_id=scenario_managed_id(scenario),
+            state=VMState.RUNNING,
+            resource_id=f"uuid-{vm_name}",
+        ),
+        template=RuntimeTemplateReference(
+            image_id="ubuntu-24.04-arm64",
+            template_id="rf-base-ubuntu-24.04-arm64",
+            name="rf-base-ubuntu-24.04-arm64",
+            fingerprint="f" * 64,
+        ),
+        guest=RuntimeGuestState(
+            architecture=Architecture.ARM64,
+            ip="192.168.64.85",
+            management=ManagementState.READY,
+        ),
+        metadata_version=4,
+    )
     RuntimeMetadataStore(scenario_path).save(
-        RuntimeMetadata(
-            scenario_id=scenario.scenario.id,
-            profile=scenario.scenario.profile,
-            runtime=RuntimeType.VM,
-            backend=VMBackend.UTM,
-            vm=VMIdentity(
-                name=scenario_vm_name(scenario),
-                managed_id=scenario_managed_id(scenario),
-                state=VMState.RUNNING,
-            ),
-            template=RuntimeTemplateReference(
-                image_id="ubuntu-24.04-arm64",
-                template_id="rf-base-ubuntu-24.04-arm64",
-                name="rf-base-ubuntu-24.04-arm64",
-                fingerprint="f" * 64,
-            ),
-            guest=RuntimeGuestState(
-                architecture=Architecture.ARM64,
-                ip="192.168.64.85",
-                management=ManagementState.READY,
-            ),
+        metadata.model_copy(
+            update={"ownership_fingerprint": ownership_fingerprint(metadata)}
         )
     )
 

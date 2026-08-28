@@ -28,8 +28,10 @@ from rangeforge.images.registry import ImageRegistry
 from rangeforge.images.templates import TemplateManager
 from rangeforge.models import Scenario
 from rangeforge.runtime import lifecycle as lifecycle_module
-from rangeforge.runtime.guest import ExecutionLanguage
-from rangeforge.runtime.lifecycle import ScenarioLifecycle
+from rangeforge.runtime.backends.base import BackendOperationError
+from rangeforge.runtime.backends.utm import UTMInventoryRecord
+from rangeforge.runtime.guest import ExecutionLanguage, GuestPlatform
+from rangeforge.runtime.lifecycle import LifecycleError, ScenarioLifecycle
 from rangeforge.runtime.management import (
     ManagementCheck,
     ManagementProbeResult,
@@ -37,6 +39,7 @@ from rangeforge.runtime.management import (
 )
 from rangeforge.runtime.metadata import (
     RuntimeMetadataStore,
+    ownership_fingerprint,
     scenario_managed_id,
     scenario_vm_name,
 )
@@ -51,6 +54,7 @@ from rangeforge.runtime.models import (
     RuntimeMetadata,
     RuntimePlan,
     RuntimeResolution,
+    RuntimeTemplateReference,
     RuntimeType,
     VMBackend,
     VMIdentity,
@@ -65,7 +69,9 @@ HOST = HostInfo(os=HostOS.DARWIN, architecture=Architecture.ARM64, apple_silicon
 class LifecycleUTM:
     def __init__(self, template_name: str) -> None:
         self.executable = Path("/usr/local/bin/utmctl")
-        self.vms: dict[str, VMState] = {template_name: VMState.STOPPED}
+        self.vms: dict[str, dict] = {
+            template_name: {"uuid": "template-uuid", "state": VMState.STOPPED}
+        }
         self.started: list[str] = []
         self.addresses: tuple[str, ...] = ("192.168.64.9",)
 
@@ -78,25 +84,56 @@ class LifecycleUTM:
     def vm_exists(self, name: str) -> bool:
         return name in self.vms
 
+    def find_by_name(self, name: str) -> UTMInventoryRecord | None:
+        entry = self.vms.get(name)
+        if entry is None:
+            return None
+        return UTMInventoryRecord(
+            uuid=entry["uuid"], name=name, state=entry["state"].value
+        )
+
+    def find_by_uuid(self, uuid: str) -> UTMInventoryRecord | None:
+        for name, entry in self.vms.items():
+            if entry["uuid"] == uuid:
+                return UTMInventoryRecord(
+                    uuid=uuid, name=name, state=entry["state"].value
+                )
+        return None
+
     def clone(self, template: str, name: str) -> None:
         assert template in self.vms
-        self.vms[name] = VMState.STOPPED
+        self.vms[name] = {"uuid": f"uuid-{name}", "state": VMState.STOPPED}
 
-    def start(self, name: str) -> None:
-        self.vms[name] = VMState.RUNNING
+    def start(self, name: str, *, uuid: str | None = None) -> None:
+        self.vms[name]["state"] = VMState.RUNNING
         self.started.append(name)
 
-    def stop(self, name: str, *, force: bool = False) -> None:
-        self.vms[name] = VMState.STOPPED
+    def stop(self, name: str, *, force: bool = False, uuid: str | None = None) -> None:
+        self.vms[name]["state"] = VMState.STOPPED
 
-    def delete(self, name: str) -> None:
+    def delete(self, name: str, *, uuid: str | None = None) -> None:
         self.vms.pop(name)
 
-    def vm_state(self, name: str) -> VMState:
-        return self.vms.get(name, VMState.NOT_BUILT)
+    def vm_state(self, name: str, *, uuid: str | None = None) -> VMState:
+        if uuid is not None:
+            record = self.find_by_uuid(uuid)
+            if record is None:
+                return VMState.MISSING
+            if record.name != name:
+                raise BackendOperationError(
+                    "Ownership conflict: UUID belongs to a different name."
+                )
+            return record.vm_state
+        entry = self.vms.get(name)
+        if entry is None:
+            return VMState.NOT_BUILT
+        return entry["state"]
 
-    def ip_addresses(self, name: str) -> tuple[str, ...]:
-        return self.addresses if self.vms.get(name) is VMState.RUNNING else ()
+    def ip_addresses(self, name: str, *, uuid: str | None = None) -> tuple[str, ...]:
+        entry = self.vms.get(name)
+        if entry is None:
+            return ()
+        return self.addresses if entry["state"] is VMState.RUNNING else ()
 
 
 class UnusedVagrant:
@@ -277,13 +314,14 @@ def test_windows_up_is_not_ready_from_ip_discovery_alone(
 ) -> None:
     scenario_path = ScenarioYamlSerializer().dump(windows_scenario, tmp_path)
     _patch_probe(monkeypatch, healthy=False)
-    result = _lifecycle(templates, utm).up(windows_scenario, scenario_path, _plan(windows_scenario))
-    assert result.metadata is not None
+    with pytest.raises(LifecycleError, match="management readiness"):
+        _lifecycle(templates, utm).up(windows_scenario, scenario_path, _plan(windows_scenario))
     # The clone has an IP and is running, yet management must stay unavailable.
-    assert result.metadata.guest.ip == "192.168.64.9"
-    assert result.metadata.vm.state is VMState.RUNNING
-    assert result.metadata.guest.management is ManagementState.UNAVAILABLE
-    assert "qga_execution" in result.message
+    persisted = RuntimeMetadataStore(scenario_path).load()
+    assert persisted is not None
+    assert persisted.guest.ip == "192.168.64.9"
+    assert persisted.vm.state is VMState.RUNNING
+    assert persisted.guest.management is ManagementState.UNAVAILABLE
 
 
 def test_windows_status_never_marks_ready_from_ip_alone(
@@ -291,33 +329,29 @@ def test_windows_status_never_marks_ready_from_ip_alone(
     templates: TemplateManager,
     utm: LifecycleUTM,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scenario_path = ScenarioYamlSerializer().dump(windows_scenario, tmp_path)
     name = scenario_vm_name(windows_scenario)
+    tmpl = templates.require_ready("windows-11-arm64", VMBackend.UTM)
     RuntimeMetadataStore(scenario_path).save(
-        RuntimeMetadata(
-            scenario_id=windows_scenario.scenario.id,
-            profile=windows_scenario.scenario.profile,
-            runtime=RuntimeType.VM,
-            backend=VMBackend.UTM,
-            vm=VMIdentity(
-                name=name, managed_id=scenario_managed_id(windows_scenario), state=VMState.RUNNING
-            ),
-            template=_template_reference(),
-            guest=RuntimeGuestState(
-                architecture=Architecture.ARM64,
-                management=ManagementState.NOT_READY,
-                platform=windows_scenario_guest_platform(),
-                management_transport=ManagementTransportKind.QEMU_GUEST_AGENT,
-                execution_language=ExecutionLanguage.POWERSHELL,
-            ),
+        _owned_metadata(
+            windows_scenario,
+            state=VMState.RUNNING,
+            management=ManagementState.NOT_READY,
+            ip="192.168.64.9",
+            template=tmpl,
         )
     )
-    utm.vms[name] = VMState.RUNNING
+    utm.vms[name] = {"uuid": "scenario-uuid", "state": VMState.RUNNING}
+    observed = _patch_probe(monkeypatch, healthy=False)
     result = _lifecycle(templates, utm).status(windows_scenario, scenario_path)
+    assert observed == [name]
     assert result.metadata is not None
     assert result.metadata.guest.ip == "192.168.64.9"
-    assert result.metadata.guest.management is ManagementState.NOT_READY
+    # Status reprobes every running Windows clone; a failed probe must never
+    # mark READY from IP discovery alone.
+    assert result.metadata.guest.management is ManagementState.UNAVAILABLE
 
 
 def test_windows_status_downgrades_ready_when_vm_is_not_running(
@@ -329,26 +363,16 @@ def test_windows_status_downgrades_ready_when_vm_is_not_running(
     """A stopped Windows clone can never retain READY across status refresh."""
     scenario_path = ScenarioYamlSerializer().dump(windows_scenario, tmp_path)
     name = scenario_vm_name(windows_scenario)
+    tmpl = templates.require_ready("windows-11-arm64", VMBackend.UTM)
     RuntimeMetadataStore(scenario_path).save(
-        RuntimeMetadata(
-            scenario_id=windows_scenario.scenario.id,
-            profile=windows_scenario.scenario.profile,
-            runtime=RuntimeType.VM,
-            backend=VMBackend.UTM,
-            vm=VMIdentity(
-                name=name, managed_id=scenario_managed_id(windows_scenario), state=VMState.STOPPED
-            ),
-            template=_template_reference(),
-            guest=RuntimeGuestState(
-                architecture=Architecture.ARM64,
-                management=ManagementState.READY,
-                platform=windows_scenario_guest_platform(),
-                management_transport=ManagementTransportKind.QEMU_GUEST_AGENT,
-                execution_language=ExecutionLanguage.POWERSHELL,
-            ),
+        _owned_metadata(
+            windows_scenario,
+            state=VMState.STOPPED,
+            management=ManagementState.READY,
+            template=tmpl,
         )
     )
-    utm.vms[name] = VMState.STOPPED
+    utm.vms[name] = {"uuid": "scenario-uuid", "state": VMState.STOPPED}
     result = _lifecycle(templates, utm).status(windows_scenario, scenario_path)
     assert result.metadata is not None
     assert result.metadata.vm.state is VMState.STOPPED
@@ -365,27 +389,17 @@ def test_windows_status_reprobes_ready_and_downgrades_on_failure(
     """A wedged channel cannot retain READY merely because its IP is stable."""
     scenario_path = ScenarioYamlSerializer().dump(windows_scenario, tmp_path)
     name = scenario_vm_name(windows_scenario)
+    tmpl = templates.require_ready("windows-11-arm64", VMBackend.UTM)
     RuntimeMetadataStore(scenario_path).save(
-        RuntimeMetadata(
-            scenario_id=windows_scenario.scenario.id,
-            profile=windows_scenario.scenario.profile,
-            runtime=RuntimeType.VM,
-            backend=VMBackend.UTM,
-            vm=VMIdentity(
-                name=name, managed_id=scenario_managed_id(windows_scenario), state=VMState.RUNNING
-            ),
-            template=_template_reference(),
-            guest=RuntimeGuestState(
-                architecture=Architecture.ARM64,
-                ip="192.168.64.9",
-                management=ManagementState.READY,
-                platform=windows_scenario_guest_platform(),
-                management_transport=ManagementTransportKind.QEMU_GUEST_AGENT,
-                execution_language=ExecutionLanguage.POWERSHELL,
-            ),
+        _owned_metadata(
+            windows_scenario,
+            state=VMState.RUNNING,
+            management=ManagementState.READY,
+            ip="192.168.64.9",
+            template=tmpl,
         )
     )
-    utm.vms[name] = VMState.RUNNING
+    utm.vms[name] = {"uuid": "scenario-uuid", "state": VMState.RUNNING}
     observed = _patch_probe(monkeypatch, healthy=False)
     result = _lifecycle(templates, utm).status(windows_scenario, scenario_path)
     assert observed == [name]
@@ -404,27 +418,17 @@ def test_windows_status_reprobes_ready_and_keeps_on_success(
 ) -> None:
     scenario_path = ScenarioYamlSerializer().dump(windows_scenario, tmp_path)
     name = scenario_vm_name(windows_scenario)
+    tmpl = templates.require_ready("windows-11-arm64", VMBackend.UTM)
     RuntimeMetadataStore(scenario_path).save(
-        RuntimeMetadata(
-            scenario_id=windows_scenario.scenario.id,
-            profile=windows_scenario.scenario.profile,
-            runtime=RuntimeType.VM,
-            backend=VMBackend.UTM,
-            vm=VMIdentity(
-                name=name, managed_id=scenario_managed_id(windows_scenario), state=VMState.RUNNING
-            ),
-            template=_template_reference(),
-            guest=RuntimeGuestState(
-                architecture=Architecture.ARM64,
-                ip="192.168.64.9",
-                management=ManagementState.READY,
-                platform=windows_scenario_guest_platform(),
-                management_transport=ManagementTransportKind.QEMU_GUEST_AGENT,
-                execution_language=ExecutionLanguage.POWERSHELL,
-            ),
+        _owned_metadata(
+            windows_scenario,
+            state=VMState.RUNNING,
+            management=ManagementState.READY,
+            ip="192.168.64.9",
+            template=tmpl,
         )
     )
-    utm.vms[name] = VMState.RUNNING
+    utm.vms[name] = {"uuid": "scenario-uuid", "state": VMState.RUNNING}
     observed = _patch_probe(monkeypatch, healthy=True)
     result = _lifecycle(templates, utm).status(windows_scenario, scenario_path)
     assert observed == [name]
@@ -448,11 +452,13 @@ def test_windows_readiness_survives_persisted_metadata_errors(
         raise RuntimeMetadataError("Runtime metadata changed during validation.")
 
     monkeypatch.setattr(lifecycle_module, "probe_windows_management", racing_factory)
-    result = _lifecycle(templates, utm).up(
-        windows_scenario, scenario_path, _plan(windows_scenario)
-    )
-    assert result.metadata is not None
-    assert result.metadata.guest.management is ManagementState.UNAVAILABLE
+    with pytest.raises(LifecycleError, match="management"):
+        _lifecycle(templates, utm).up(
+            windows_scenario, scenario_path, _plan(windows_scenario)
+        )
+    persisted = RuntimeMetadataStore(scenario_path).load()
+    assert persisted is not None
+    assert persisted.guest.management is ManagementState.UNAVAILABLE
 
 
 def test_legacy_metadata_keeps_linux_ip_readiness(
@@ -474,9 +480,10 @@ def test_legacy_metadata_keeps_linux_ip_readiness(
             ),
             template=_template_reference(),
             guest=RuntimeGuestState(architecture=Architecture.ARM64),
+            metadata_version=2,
         )
     )
-    utm.vms[name] = VMState.RUNNING
+    utm.vms[name] = {"uuid": "legacy-uuid", "state": VMState.RUNNING}
     result = _lifecycle(templates, utm).status(scenario, scenario_path)
     assert result.metadata is not None
     assert result.metadata.guest.management is ManagementState.READY
@@ -496,27 +503,27 @@ def test_probe_never_targets_base_template(
         raise AssertionError("transport construction must never reach the base template")
 
     monkeypatch.setattr(lifecycle_module, "probe_windows_management", forbidden_factory)
-    tampered = RuntimeMetadata(
-        scenario_id=windows_scenario.scenario.id,
-        profile=windows_scenario.scenario.profile,
-        runtime=RuntimeType.VM,
-        backend=VMBackend.UTM,
-        vm=VMIdentity(
-            name=name, managed_id=scenario_managed_id(windows_scenario), state=VMState.RUNNING
-        ),
-        template=_template_reference().model_copy(update={"name": name}),
-        guest=RuntimeGuestState(
-            architecture=Architecture.ARM64,
-            platform=windows_scenario_guest_platform(),
-            management_transport=ManagementTransportKind.QEMU_GUEST_AGENT,
-            execution_language=ExecutionLanguage.POWERSHELL,
-        ),
+    tmpl = templates.require_ready("windows-11-arm64", VMBackend.UTM)
+    tampered = _owned_metadata(
+        windows_scenario, state=VMState.RUNNING, template=tmpl
+    ).model_copy(
+        update={
+            "template": RuntimeTemplateReference(
+                image_id=tmpl.image_id,
+                template_id=tmpl.id,
+                name=name,
+                fingerprint=tmpl.fingerprint,
+            )
+        }
+    )
+    tampered = tampered.model_copy(
+        update={"ownership_fingerprint": ownership_fingerprint(tampered)}
     )
     RuntimeMetadataStore(scenario_path).save(tampered)
     with pytest.raises(Exception, match="template"):
         _lifecycle(templates, utm).up(windows_scenario, scenario_path, _plan(windows_scenario))
     assert utm.started == []
-    assert utm.vms[TEMPLATE_NAME] is VMState.STOPPED
+    assert utm.vms[TEMPLATE_NAME]["state"] is VMState.STOPPED
 
 
 def _template_reference():
@@ -527,6 +534,61 @@ def _template_reference():
         template_id=TEMPLATE_NAME,
         name=TEMPLATE_NAME,
         fingerprint="a" * 64,
+    )
+
+
+def _owned_metadata(
+    scenario: Scenario,
+    *,
+    state: VMState,
+    management: ManagementState = ManagementState.NOT_READY,
+    ip: str | None = None,
+    resource_id: str | None = "scenario-uuid",
+    platform: GuestPlatform = GuestPlatform.WINDOWS,
+    metadata_version: int = 4,
+    template=None,
+) -> RuntimeMetadata:
+    """Build schema-4 owned metadata for an owned scenario clone.
+
+    When ``template`` (the prepared ``BaseTemplate``) is provided, the
+    persisted template identity and fingerprint match the trusted registry so
+    idempotent build reconciliation and management-target validation succeed.
+    """
+    name = scenario_vm_name(scenario)
+    template_ref = (
+        RuntimeTemplateReference(
+            image_id=template.image_id,
+            template_id=template.id,
+            name=template.reference,
+            fingerprint=template.fingerprint,
+        )
+        if template is not None
+        else _template_reference()
+    )
+    metadata = RuntimeMetadata(
+        scenario_id=scenario.scenario.id,
+        profile=scenario.scenario.profile,
+        runtime=RuntimeType.VM,
+        backend=VMBackend.UTM,
+        vm=VMIdentity(
+            name=name,
+            managed_id=scenario_managed_id(scenario),
+            state=state,
+            resource_id=resource_id,
+        ),
+        template=template_ref,
+        guest=RuntimeGuestState(
+            architecture=Architecture.ARM64,
+            ip=ip,
+            management=management,
+            platform=platform,
+            management_transport=ManagementTransportKind.QEMU_GUEST_AGENT,
+            execution_language=ExecutionLanguage.POWERSHELL,
+        ),
+        metadata_version=metadata_version,
+    )
+    return metadata.model_copy(
+        update={"ownership_fingerprint": ownership_fingerprint(metadata)}
     )
 
 
@@ -543,9 +605,13 @@ def test_transport_error_leaves_management_unavailable(
         raise ManagementTransportError("Owned UTM scenario VM is missing.")
 
     monkeypatch.setattr(lifecycle_module, "probe_windows_management", failing_factory)
-    result = _lifecycle(templates, utm).up(windows_scenario, scenario_path, _plan(windows_scenario))
-    assert result.metadata is not None
-    assert result.metadata.guest.management is ManagementState.UNAVAILABLE
+    with pytest.raises(LifecycleError, match="management"):
+        _lifecycle(templates, utm).up(
+            windows_scenario, scenario_path, _plan(windows_scenario)
+        )
+    persisted = RuntimeMetadataStore(scenario_path).load()
+    assert persisted is not None
+    assert persisted.guest.management is ManagementState.UNAVAILABLE
 
 
 def test_legacy_windows_metadata_is_rejected_before_backend_calls(
@@ -565,7 +631,7 @@ def test_legacy_windows_metadata_is_rejected_before_backend_calls(
     """
     scenario_path = ScenarioYamlSerializer().dump(windows_scenario, tmp_path)
     name = scenario_vm_name(windows_scenario)
-    utm.vms[name] = VMState.RUNNING
+    utm.vms[name] = {"uuid": "legacy-uuid", "state": VMState.RUNNING}
     RuntimeMetadataStore(scenario_path).save(
         RuntimeMetadata(
             scenario_id=windows_scenario.scenario.id,
@@ -605,7 +671,7 @@ def test_legacy_linux_metadata_still_uses_ip_readiness(
     """Legacy Linux metadata keeps the historical Linux behavior."""
     scenario_path = ScenarioYamlSerializer().dump(scenario, tmp_path)
     name = scenario_vm_name(scenario)
-    utm.vms[name] = VMState.RUNNING
+    utm.vms[name] = {"uuid": "legacy-uuid", "state": VMState.RUNNING}
     RuntimeMetadataStore(scenario_path).save(
         RuntimeMetadata(
             scenario_id=scenario.scenario.id,
@@ -637,37 +703,28 @@ def test_windows_up_reprobes_stale_ready_and_downgrades(
     """A previously READY Windows channel must be re-verified on up()."""
     scenario_path = ScenarioYamlSerializer().dump(windows_scenario, tmp_path)
     name = scenario_vm_name(windows_scenario)
-    utm.vms[name] = VMState.RUNNING
+    tmpl = templates.require_ready("windows-11-arm64", VMBackend.UTM)
+    utm.vms[name] = {"uuid": "scenario-uuid", "state": VMState.RUNNING}
     RuntimeMetadataStore(scenario_path).save(
-        RuntimeMetadata(
-            scenario_id=windows_scenario.scenario.id,
-            profile=windows_scenario.scenario.profile,
-            runtime=RuntimeType.VM,
-            backend=VMBackend.UTM,
-            vm=VMIdentity(
-                name=name,
-                managed_id=scenario_managed_id(windows_scenario),
-                state=VMState.RUNNING,
-            ),
-            template=_template_reference(),
-            guest=RuntimeGuestState(
-                architecture=Architecture.ARM64,
-                management=ManagementState.READY,
-                platform=windows_scenario_guest_platform(),
-                management_transport=ManagementTransportKind.QEMU_GUEST_AGENT,
-                execution_language=ExecutionLanguage.POWERSHELL,
-            ),
+        _owned_metadata(
+            windows_scenario,
+            state=VMState.RUNNING,
+            management=ManagementState.READY,
+            ip="192.168.64.9",
+            template=tmpl,
         )
     )
     observed = _patch_probe(monkeypatch, healthy=False)
-    result = _lifecycle(templates, utm).up(
-        windows_scenario, scenario_path, _plan(windows_scenario)
-    )
+    with pytest.raises(LifecycleError, match="management"):
+        _lifecycle(templates, utm).up(
+            windows_scenario, scenario_path, _plan(windows_scenario)
+        )
     assert observed == [name]
     assert utm.started == []
-    assert result.metadata is not None
-    assert result.metadata.vm.state is VMState.RUNNING
-    assert result.metadata.guest.management is ManagementState.UNAVAILABLE
+    persisted = RuntimeMetadataStore(scenario_path).load()
+    assert persisted is not None
+    assert persisted.vm.state is VMState.RUNNING
+    assert persisted.guest.management is ManagementState.UNAVAILABLE
 
 
 def test_windows_up_keeps_ready_after_healthy_reprobe(
@@ -679,26 +736,15 @@ def test_windows_up_keeps_ready_after_healthy_reprobe(
 ) -> None:
     scenario_path = ScenarioYamlSerializer().dump(windows_scenario, tmp_path)
     name = scenario_vm_name(windows_scenario)
-    utm.vms[name] = VMState.RUNNING
+    tmpl = templates.require_ready("windows-11-arm64", VMBackend.UTM)
+    utm.vms[name] = {"uuid": "scenario-uuid", "state": VMState.RUNNING}
     RuntimeMetadataStore(scenario_path).save(
-        RuntimeMetadata(
-            scenario_id=windows_scenario.scenario.id,
-            profile=windows_scenario.scenario.profile,
-            runtime=RuntimeType.VM,
-            backend=VMBackend.UTM,
-            vm=VMIdentity(
-                name=name,
-                managed_id=scenario_managed_id(windows_scenario),
-                state=VMState.RUNNING,
-            ),
-            template=_template_reference(),
-            guest=RuntimeGuestState(
-                architecture=Architecture.ARM64,
-                management=ManagementState.READY,
-                platform=windows_scenario_guest_platform(),
-                management_transport=ManagementTransportKind.QEMU_GUEST_AGENT,
-                execution_language=ExecutionLanguage.POWERSHELL,
-            ),
+        _owned_metadata(
+            windows_scenario,
+            state=VMState.RUNNING,
+            management=ManagementState.READY,
+            ip="192.168.64.9",
+            template=tmpl,
         )
     )
     observed = _patch_probe(monkeypatch, healthy=True)

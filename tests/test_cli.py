@@ -5,7 +5,7 @@ import pytest
 from typer.testing import CliRunner
 
 from rangeforge.cli import app
-from rangeforge.host.models import Architecture
+from rangeforge.host.models import Architecture, HostInfo, HostOS
 from rangeforge.images.cache import ImageCache
 from rangeforge.images.models import (
     ArtifactFormat,
@@ -17,6 +17,8 @@ from rangeforge.images.models import (
 )
 from rangeforge.images.registry import ImageRegistry
 from rangeforge.models import Scenario
+from rangeforge.runtime.backends.base import BackendOperationError
+from rangeforge.runtime.backends.utm import UTMBackend
 from rangeforge.runtime.models import RuntimeType, VMBackend
 from rangeforge.serialization.yaml import ScenarioYamlSerializer
 
@@ -199,3 +201,191 @@ def test_images_verify_cli_success(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     result = CliRunner().invoke(app, ["images", "verify", manifest.id, "--config", str(config)])
     assert result.exit_code == 0, result.output
     assert "VALID" in result.output
+
+
+def _windows_scenario_path(scenario: Scenario, tmp_path: Path) -> Path:
+    windows_scenario = scenario.model_copy(
+        update={
+            "scenario": scenario.scenario.model_copy(
+                update={"platform": "windows", "guest_architecture": "arm64"}
+            )
+        }
+    )
+    return ScenarioYamlSerializer().dump(windows_scenario, tmp_path)
+
+
+def _config_path(tmp_path: Path) -> Path:
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"images:\n  cache_dir: {tmp_path / 'images'}\n", encoding="utf-8"
+    )
+    return config
+
+
+def _hermetic_utm_inventory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin standalone lifecycle commands to a deterministic darwin/UTM host.
+
+    Lifecycle commands reconcile backend inventory before reporting state;
+    pinning the detected host and the inventory response keeps these tests
+    independent of whether a local UTM app is installed and responsive.
+    """
+    monkeypatch.setattr(
+        "rangeforge.cli._host",
+        lambda _config: HostInfo(
+            os=HostOS.DARWIN,
+            architecture=Architecture.ARM64,
+            apple_silicon=True,
+        ),
+    )
+    monkeypatch.setattr(UTMBackend, "list_vms", lambda self: ())
+
+
+def test_stop_command_is_registered(tmp_path: Path) -> None:
+    result = CliRunner().invoke(app, ["stop", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "Stop the owned scenario VM" in result.output
+
+
+def test_windows_scenario_runtime_plan_is_accepted(
+    scenario: Scenario, tmp_path: Path
+) -> None:
+    scenario_path = _windows_scenario_path(scenario, tmp_path)
+    config = _config_path(tmp_path)
+    result = CliRunner().invoke(
+        app,
+        ["runtime", "plan", str(scenario_path), "--runtime", "vm", "--config", str(config)],
+    )
+    # A standalone Windows lifecycle scenario must pass lifecycle structural
+    # validation and reach the planner (it may not be deployable here).
+    assert result.exit_code == 0, result.output
+    assert "RangeForge Runtime Plan" in result.output
+
+
+def test_windows_scenario_status_is_accepted_and_reports_not_built(
+    scenario: Scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _hermetic_utm_inventory(monkeypatch)
+    scenario_path = _windows_scenario_path(scenario, tmp_path)
+    config = _config_path(tmp_path)
+    result = CliRunner().invoke(
+        app, ["status", str(scenario_path), "--config", str(config)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Scenario VM is not built." in result.output
+
+
+def test_windows_scenario_stop_is_accepted_and_reports_not_built(
+    scenario: Scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _hermetic_utm_inventory(monkeypatch)
+    scenario_path = _windows_scenario_path(scenario, tmp_path)
+    config = _config_path(tmp_path)
+    result = CliRunner().invoke(
+        app, ["stop", str(scenario_path), "--config", str(config)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Scenario VM is not built." in result.output
+
+
+def test_lifecycle_cli_envelopes_backend_operation_error(
+    scenario: Scenario,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backend identity/inventory failures render as controlled failures.
+
+    A backend operation error raised from the lifecycle (here: an unavailable
+    UTM backend during status reconciliation) must be reported through the
+    lifecycle error envelope with exit code 1, never escape as an uncaught
+    exception.
+    """
+    monkeypatch.setattr(
+        "rangeforge.cli._host",
+        lambda _config: HostInfo(
+            os=HostOS.DARWIN,
+            architecture=Architecture.ARM64,
+            apple_silicon=True,
+        ),
+    )
+    scenario_path = ScenarioYamlSerializer().dump(scenario, tmp_path)
+    config = _config_path(tmp_path)
+    result = CliRunner().invoke(
+        app, ["status", str(scenario_path), "--config", str(config)]
+    )
+    assert result.exit_code == 1, result.output
+    assert "Status failed:" in result.output
+    assert "UTM backend is unavailable" in result.output
+    assert not isinstance(result.exception, BackendOperationError)
+
+
+@pytest.mark.parametrize(
+    ("command", "context_factory", "message"),
+    [
+        ("provision", "_runtime_context", "Provisioning failed:"),
+        ("validate", "_lifecycle_only_context", "Runtime validation failed:"),
+    ],
+)
+def test_runtime_cli_envelopes_backend_operation_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    context_factory: str,
+    message: str,
+) -> None:
+    def fail_context(*_args: object, **_kwargs: object) -> None:
+        raise BackendOperationError("UTM inventory unavailable")
+
+    monkeypatch.setattr(f"rangeforge.cli.{context_factory}", fail_context)
+    result = CliRunner().invoke(app, [command, str(tmp_path / "scenario.yaml")])
+
+    assert result.exit_code == 1, result.output
+    assert message in result.output
+    assert "UTM inventory unavailable" in result.output
+    assert not isinstance(result.exception, BackendOperationError)
+
+
+def test_windows_scenario_provision_is_denied(
+    scenario: Scenario, tmp_path: Path
+) -> None:
+    scenario_path = _windows_scenario_path(scenario, tmp_path)
+    config = _config_path(tmp_path)
+    result = CliRunner().invoke(
+        app, ["provision", str(scenario_path), "--config", str(config)]
+    )
+    assert result.exit_code == 1
+    assert "failed" in result.output
+
+
+def test_windows_scenario_validate_is_denied(
+    scenario: Scenario, tmp_path: Path
+) -> None:
+    scenario_path = _windows_scenario_path(scenario, tmp_path)
+    config = _config_path(tmp_path)
+    result = CliRunner().invoke(
+        app, ["validate", str(scenario_path), "--config", str(config)]
+    )
+    assert result.exit_code == 1
+    assert "failed" in result.output
+
+
+def test_windows_platform_generation_is_denied(tmp_path: Path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "generate",
+            "--profile",
+            "oscp",
+            "--mode",
+            "standalone",
+            "--platform",
+            "windows",
+            "--difficulty",
+            "medium",
+            "--seed",
+            "1337",
+            "--dry-run",
+            "--output",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 1

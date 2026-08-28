@@ -1,4 +1,18 @@
-"""Independent static checks for generated or loaded scenarios."""
+"""Independent static checks for generated or loaded scenarios.
+
+This module provides two validation paths:
+
+1. ``ScenarioValidator.validate()`` — full profile-gated curriculum, primitive,
+   and graph-solvability validation. Used by ``generate``, ``provision``,
+   ``validate``, and all commands that modify or inspect training content.
+
+2. ``validate_lifecycle_structure()`` — structural validation for standalone
+   runtime lifecycle commands (``runtime plan``, ``build``, ``up``, ``status``,
+   ``stop``, ``destroy``). This path validates scenario identity and
+   runtime-relevant structure without checking curriculum eligibility, technique
+   policy, or graph solvability. It is selected by command scope and never
+   enables generation, provisioning, primitive selection, or runtime validity.
+"""
 
 from rangeforge.graph.solver import GraphSolver
 from rangeforge.models import Primitive, Scenario, TrainingProfile, ValidationResult
@@ -100,3 +114,41 @@ class ScenarioValidator:
             errors=tuple(dict.fromkeys(errors)),
             vm_deployed=False,
         )
+
+
+def validate_lifecycle_structure(scenario: Scenario, profile: TrainingProfile) -> list[str]:
+    """Structural validation for standalone runtime lifecycle commands.
+
+    This is a narrower validation path than ``ScenarioValidator.validate()``.
+    It checks:
+    - The scenario has a valid profile reference.
+    - The scenario has a well-formed platform, architecture, and mode.
+    - The profile declares the required mode.
+
+    It does not check:
+    - Whether the platform is allowed by the profile.
+    - Whether the selected primitives are allowed techniques.
+    - Whether the attack graph is solvable.
+    - Curriculum eligibility or training-policy violations.
+
+    This validation is selected by command scope (runtime plan, build, up,
+    status, stop, destroy) and must never enable generation, provisioning,
+    primitive selection, or runtime validity for an otherwise-ineligible
+    scenario.
+    """
+    issues: list[str] = []
+    if scenario.scenario.profile != profile.id:
+        issues.append(
+            f"Scenario profile '{scenario.scenario.profile}' does not match loaded profile "
+            f"'{profile.id}'."
+        )
+    if not scenario.scenario.platform:
+        issues.append("Scenario has no declared platform.")
+    if not scenario.scenario.guest_architecture:
+        issues.append("Scenario has no declared guest architecture.")
+    mode = profile.modes.get(scenario.scenario.mode)
+    if mode is None:
+        issues.append(
+            f"Mode '{scenario.scenario.mode}' is not defined by profile '{profile.id}'."
+        )
+    return issues
